@@ -76,6 +76,8 @@ ParametersPanel::ParametersPanel()
     addAndMakeVisible(smoothingSlider);
     addAndMakeVisible(centreLineAlphaLabel);
     addAndMakeVisible(centreLineAlphaSlider);
+    addAndMakeVisible(waveformHeightLabel);
+    addAndMakeVisible(waveformHeightSlider);
 
     configureSlider(lowAmountSlider, 0.0, 1.0, params.lowFreqAmount);
     configureSlider(midAmountSlider, 0.0, 1.0, params.midFreqAmount);
@@ -83,6 +85,7 @@ ParametersPanel::ParametersPanel()
     configureSlider(aaSlider, 0.1, 8.0, params.aaWidth);
     configureSlider(smoothingSlider, 0.0, 1.0, params.smoothing);
     configureSlider(centreLineAlphaSlider, 0.0, 1.0, params.centreLineAlpha);
+    configureSlider(waveformHeightSlider, 0.01, 1.0, params.waveformHeight);
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
     solidColourButton.onClick = [this]
@@ -112,6 +115,7 @@ ParametersPanel::ParametersPanel()
     aaSlider.onValueChange = [this] { params.aaWidth = (float) aaSlider.getValue(); notify(); };
     smoothingSlider.onValueChange = [this] { params.smoothing = (float) smoothingSlider.getValue(); notify(); };
     centreLineAlphaSlider.onValueChange = [this] { params.centreLineAlpha = (float) centreLineAlphaSlider.getValue(); notify(); };
+    waveformHeightSlider.onValueChange = [this] { params.waveformHeight = (float) waveformHeightSlider.getValue(); notify(); };
     tintingEnabledButton.onClick = [this] { params.tintingEnabled = tintingEnabledButton.getToggleState(); notify(); };
 }
 
@@ -124,6 +128,7 @@ void ParametersPanel::setParameters(const WaveformParameters& p)
     aaSlider.setValue(params.aaWidth, juce::dontSendNotification);
     smoothingSlider.setValue(params.smoothing, juce::dontSendNotification);
     centreLineAlphaSlider.setValue(params.centreLineAlpha, juce::dontSendNotification);
+    waveformHeightSlider.setValue(params.waveformHeight, juce::dontSendNotification);
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
     solidSwatch.setColour(params.solidColour);
@@ -181,4 +186,5 @@ void ParametersPanel::resized()
     row(aaLabel, aaSlider);
     row(smoothingLabel, smoothingSlider);
     row(centreLineAlphaLabel, centreLineAlphaSlider);
+    row(waveformHeightLabel, waveformHeightSlider);
 }

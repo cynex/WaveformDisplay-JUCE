@@ -42,5 +42,13 @@ struct WaveformParameters
 
     // Opacity (0..1) of a solid white 1px horizontal line drawn through the
     // vertical centre of the waveform (the zero-amplitude axis). 0 hides it entirely.
-    float centreLineAlpha = 0.3f;
+    float centreLineAlpha = 1.0f;
+
+    // Fraction (0.01..1) of the component's full height the waveform's
+    // amplitude range is rendered into, centred vertically - 1.0 uses the
+    // whole height (the previous, only, behaviour); smaller values shrink
+    // the rendered waveform so it can be previewed at different pixel
+    // heights (e.g. to check for jitter) without resizing the component
+    // itself.
+    float waveformHeight = 1.0f;
 };

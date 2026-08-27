@@ -67,6 +67,7 @@ namespace
         uniform float smoothing;       // extra feather, 0..1
         uniform float pixelHeight;     // component height in pixels
         uniform float pixelWidth;      // component width in pixels
+        uniform float heightScale;     // 0.01..1 - fraction of full height the waveform amplitude occupies, centred
         uniform vec3 solidColour;
         uniform vec3 lowColour;
         uniform vec3 midColour;
@@ -126,8 +127,14 @@ namespace
             float midE0 = texture2D(midTex, vec2((idx0 + 0.5) / texWidth, 0.5)).r;
             float midE1 = texture2D(midTex, vec2((idx1 + 0.5) / texWidth, 0.5)).r;
 
-            // Fragment's y position in the same -1..1 amplitude space as the envelope.
-            float y = (vUv.y * 2.0 - 1.0);
+            // Fragment's y position in the same -1..1 amplitude space as the
+            // envelope, rescaled by heightScale so the full amplitude range
+            // (-1..1) maps onto only the central heightScale fraction of the
+            // component's height - the rest simply falls outside the SDF
+            // band and reads as background, same as being zoomed out
+            // vertically. heightScale=1 reproduces the original mapping
+            // exactly.
+            float y = (vUv.y * 2.0 - 1.0) / max(heightScale, 0.0001);
 
             // Convert the AA width parameter (pixel-space) into the same
             // normalised amplitude units used above. Smoothing is applied
@@ -152,8 +159,43 @@ namespace
             // time instead of coming from GL_LINEAR - and, unlike the
             // GL_LINEAR case, present regardless of what's moving the view,
             // which is why it started showing up during panning too.
+            // Clamped to a small fraction of a texel, not just to
+            // texelsPerPixel*0.5 outright: at close to 1:1 texel-to-pixel
+            // (routinely the case in a large/fullscreen window, since the
+            // texture width tracks the component's pixel width almost
+            // exactly - see uploadWaveformTexture), texelsPerPixel is ~1, so
+            // an unclamped half-width of ~0.5 texels spans the ENTIRE gap
+            // between texel centres. That makes every fragment blend the two
+            // neighbouring blocks' coverage across the whole texel instead of
+            // only right at the boundary - i.e. almost full linear
+            // interpolation of the envelope between blocks, which is exactly
+            // the peak "breathing" flicker GL_NEAREST was chosen to avoid
+            // (see newOpenGLContextCreated). Capping it keeps the crossfade
+            // genuinely narrow - most of each texel still commits fully to
+            // its own block - regardless of how close to 1:1 the current
+            // window size/resolution happens to land.
             float texelsPerPixel = texWidth / max(pixelWidth, 1.0);
-            float halfBlend = max(texelsPerPixel * 0.5, 0.02);
+            float halfBlend = clamp(texelsPerPixel * 0.5, 0.02, 0.15);
+
+            // Widen the crossfade further when the two neighbouring blocks'
+            // heights actually differ a lot (common between COARSE mip
+            // blocks when zoomed out - each spans much more audio, so
+            // adjacent peaks vary far more than at fine zoom). The fixed
+            // narrow width above is sized for the ordinary case of
+            // near-identical neighbours; at a boundary with a big jump it's
+            // still only a sliver of a pixel wide, so as that boundary
+            // scrolls through a pixel column across frames the transition
+            // finishes in fewer frames than it's visible for, reading as a
+            // "pop" rather than a smooth sweep. Scaling the width by the
+            // actual height delta spreads exactly the boundaries that need
+            // it over more pixels/frames, while leaving the common
+            // near-identical case at the base width - so this doesn't
+            // reintroduce the coverage-blending "breathing" the base clamp
+            // above was added to avoid (that came from widening the band
+            // for EVERY boundary, not just the ones with a real jump).
+            float edgeDelta = max(abs(texel0.g - texel1.g), abs(texel0.r - texel1.r));
+            halfBlend = clamp(halfBlend + edgeDelta * 0.4, 0.02, 0.35);
+
             float blend = smoothstep(0.5 - halfBlend, 0.5 + halfBlend, frac);
 
             float coverage = mix(coverage0, coverage1, blend);
@@ -292,15 +334,59 @@ void WaveformComponent::resized()
 void WaveformComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
     const double total = getTotalLength();
-    if (total <= 0.0)
+    if (total <= 0.0 || getWidth() <= 0)
         return;
 
     // Sample under the cursor, used as the fixed point for zooming.
     const double relX = juce::jlimit(0.0, 1.0, (double) e.position.x / juce::jmax(1, getWidth()));
     const double sampleUnderCursor = viewStart + relX * viewLength;
 
+    const double pixelWidthD = (double) getWidth();
+    const double currentSamplesPerPixel = viewLength / pixelWidthD;
     const double zoomFactor = std::pow(0.85, wheel.deltaY * 10.0 * (wheel.isReversed ? -1.0 : 1.0));
-    double newLength = juce::jlimit(64.0, total, viewLength * zoomFactor);
+    const bool zoomingIn = zoomFactor < 1.0;
+
+    double newSamplesPerPixel;
+
+    if (e.mods.isAltDown())
+    {
+        // Micro zoom: small FRACTIONAL samples/px steps rather than a whole
+        // sample - for pinpointing exactly which samples/px value a
+        // rendering artifact starts/stops at, which a whole-integer step
+        // is too coarse to isolate.
+        constexpr double microStep = 0.05;
+        newSamplesPerPixel = currentSamplesPerPixel + (zoomingIn ? -microStep : microStep);
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        // Snapped to a WHOLE number of samples/px. viewLength then comes
+        // out as an exact integer multiple of the component's pixel width -
+        // which is what lets the raw-sample fallback's bucket grid
+        // (samplesPerBucketI, in uploadWaveformTexture) and the pixel-snap
+        // grid (in renderOpenGL) work out to exactly the same integer
+        // sample-per-pixel value with no fractional rounding difference
+        // between them.
+        const double requested = currentSamplesPerPixel * zoomFactor;
+        int currentStep = (int) std::llround(currentSamplesPerPixel);
+        int newStep = (int) std::llround(requested);
+        if (newStep == currentStep)
+        {
+            // A small wheel movement can round-trip back to the same
+            // integer step - still move by at least 1 so the wheel never
+            // feels dead.
+            newStep = zoomingIn ? currentStep - 1 : currentStep + 1;
+        }
+        newSamplesPerPixel = (double) newStep;
+    }
+    else
+    {
+        // Plain wheel: ordinary continuous zoom.
+        newSamplesPerPixel = currentSamplesPerPixel * zoomFactor;
+    }
+
+    newSamplesPerPixel = juce::jmax(0.01, newSamplesPerPixel);
+
+    double newLength = juce::jlimit(64.0, total, newSamplesPerPixel * pixelWidthD);
 
     double newStart = sampleUnderCursor - relX * newLength;
 
@@ -430,14 +516,165 @@ void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double vi
     // rendered peaks from flickering as the view pans/zooms by fractional
     // amounts - only whole buckets enter/leave at the edges, and each
     // bucket's min/max already accounts for every sample inside it.
+    // The 0.75 margin below means a level is accepted once its blocks would
+    // fill at most 75% of the target width, not 100%. Right at 100% each
+    // block lands almost exactly one screen pixel wide - the worst-case
+    // ratio for GL_NEAREST sampling, since then tiny per-pixel misalignments
+    // between block edges and pixel centres show up as a widespread, subtle
+    // moire/shimmer across the whole waveform rather than a single obvious
+    // edge (this is what read as flicker specifically at "middle" zoom
+    // levels, i.e. the point in each mip level's zoom range right before it
+    // would otherwise switch to the next, coarser level). Stopping earlier
+    // keeps blocks consistently a bit wider than one pixel through most of
+    // each level's zoom range instead of hovering at that 1:1 ratio.
     int level = 0;
     while (level + 1 < numLevels)
     {
         const double levelSamplesPerBlock = baseSamplesPerBlock * (double) (1 << level);
         const double blocksInViewAtLevel = viewLengthSamples / levelSamplesPerBlock;
-        if (blocksInViewAtLevel <= (double) targetWidth)
+        if (blocksInViewAtLevel <= (double) targetWidth * 0.75)
             break;
         ++level;
+    }
+
+    // Even mip level 0 (the finest available) has a fixed block size - for
+    // a long file that's still tens to hundreds of raw samples per block
+    // (see AudioEngine::analyse), so zooming in past the point where one
+    // block would cover less than a screen pixel doesn't reveal any more
+    // detail from the pyramid - every pixel just keeps reading the SAME
+    // block's flat min/max rectangle, which is what looks blocky/
+    // staircase-stepped at high zoom. Past that point, read actual samples
+    // directly instead (cheap here - by definition the visible span is
+    // small enough that raw blocks would beat the finest pyramid level).
+    //
+    // Hysteresis: enter the fallback at 0.9x the block size but only leave
+    // it again past 1.1x, using the PREVIOUS decision (diagPrevRawFallbackActive)
+    // rather than a single fixed threshold. At a genuinely static zoom this
+    // ratio should be bit-identical rebuild to rebuild - but a ~1px jitter
+    // in getWidth()/the GL rendering scale between rebuilds was enough to
+    // tip a single threshold sitting right at that boundary back and forth,
+    // which is what read as the raw/mip render (two visually very
+    // different styles) flapping every rebuild at some zoom levels even
+    // though nothing was actually changing. A single px of jitter can no
+    // longer cross a 0.9x-to-1.1x gap, so the decision now stays put unless
+    // the zoom genuinely changes.
+    const double samplesPerPixelForFallback = viewLengthSamples / (double) targetWidth;
+    const double enterThreshold = baseSamplesPerBlock * 0.9;
+    const double exitThreshold = baseSamplesPerBlock * 1.1;
+    const bool stayingInRawFallback = diagPrevRawFallbackValid && diagPrevRawFallbackActive && samplesPerPixelForFallback < exitThreshold;
+    const bool wantsRawFallback = level == 0 && (samplesPerPixelForFallback < enterThreshold || stayingInRawFallback);
+
+    // Diagnostics - see the getters in the header. Set from the actual
+    // decision variable used below, not recomputed externally, so it can't
+    // disagree with what this function actually does.
+    diagRawFallbackActive.store(wantsRawFallback);
+    if (diagPrevRawFallbackValid && wantsRawFallback != diagPrevRawFallbackActive)
+        ++diagRawFallbackFlipCount;
+    diagPrevRawFallbackActive = wantsRawFallback;
+    diagPrevRawFallbackValid = true;
+
+    if (wantsRawFallback)
+    {
+        // Anchored to a fixed grid rooted at absolute sample 0 - exactly
+        // the same principle as the mip pyramid's fixed block boundaries
+        // (see the big comment above the level-selection loop) - and done
+        // in pure INTEGER sample arithmetic throughout, not doubles. The
+        // previous double-based version computed rawStart/rawSpan via
+        // independent floor()/ceil() of firstBucket*samplesPerBucket, which
+        // could each round differently by up to ~1 sample depending on
+        // firstBucket's exact fractional phase - meaning the actual bucket
+        // width getRawBlocks ended up using (spanSamples/numBuckets)
+        // wobbled by a tiny amount between rebuilds instead of staying
+        // bit-for-bit identical. That's exactly the same "same audio,
+        // different bucket boundaries between rebuilds" bug the anchoring
+        // was meant to fix, just reintroduced one level down - still
+        // visible as the shape occasionally jumping, worse at deep zoom
+        // where a whole bucket can be as narrow as a single sample, so even
+        // a 1-sample wobble is a meaningful fraction of one. Integer
+        // arithmetic here makes rawStart and rawSpan EXACT multiples of
+        // samplesPerBucketI, so getRawBlocks' bucket width is bit-for-bit
+        // identical across every rebuild at a given zoom level, with no
+        // rounding ambiguity at all.
+        const juce::int64 samplesPerBucketI = juce::jmax<juce::int64>(1, (juce::int64) std::llround(viewLengthSamples / (double) targetWidth));
+        const juce::int64 totalSamplesI = (juce::int64) juce::jmax(1.0, getTotalLength());
+        const juce::int64 totalBucketsAtThisSize = juce::jmax<juce::int64>(1, (totalSamplesI + samplesPerBucketI - 1) / samplesPerBucketI);
+
+        // Margin on BOTH sides of the view, sized proportionally to the view
+        // itself (half the view's width in buckets each side, same 2x-total
+        // spirit as the old viewLengthSamples*0.5-each-side margin) rather
+        // than a small fixed bucket count - a fixed margin covers less and
+        // less real playback TIME the further zoomed in you go (each bucket
+        // covers fewer samples), which meant the texture needed rebuilding
+        // almost every single frame at high zoom, and that's what read as
+        // worse jumping specifically when zoomed in further.
+        const juce::int64 marginBuckets = juce::jmax<juce::int64>(32, (juce::int64) targetWidth / 2);
+        const juce::int64 windowBuckets = juce::jmin<juce::int64>(safeMaxWidth, juce::jmin<juce::int64>(totalBucketsAtThisSize, (juce::int64) targetWidth + marginBuckets * 2));
+
+        const juce::int64 viewStartI = (juce::int64) std::floor(juce::jmax(0.0, viewStartSamples));
+        const juce::int64 viewFirstBucket = viewStartI / samplesPerBucketI;
+        juce::int64 firstBucket = viewFirstBucket - marginBuckets;
+        firstBucket = juce::jlimit<juce::int64>(0, totalBucketsAtThisSize - windowBuckets, firstBucket);
+
+        const juce::int64 rawStart = firstBucket * samplesPerBucketI;
+        const juce::int64 rawSpanRequested = windowBuckets * samplesPerBucketI;
+        // Clamped against the file length here too (not just left to
+        // getRawBlocks' own internal clamp) - textureViewLength below needs
+        // to record the span that's ACTUALLY been filled, not the span that
+        // was merely requested. Leaving it unclamped meant that whenever the
+        // window ran past end-of-file (routine once zoomed in near the end
+        // of a track), the shader's texMapOffset/Scale mapping assumed a
+        // wider span than the texture actually held data for, which read as
+        // the waveform intermittently jumping/misaligning.
+        const juce::int64 rawSpan = juce::jmax<juce::int64>(0, juce::jmin(rawSpanRequested, totalSamplesI - rawStart));
+        const int rawTextureWidth = (int) windowBuckets;
+
+        std::vector<WaveformBlock> rawBlocks;
+        if (rawSpan > 0 && audioEngine.getRawBlocks(rawStart, rawSpan, rawTextureWidth, rawBlocks))
+        {
+            textureWidth = rawTextureWidth;
+
+            auto toByteRaw = [](float v01) -> juce::uint8
+            {
+                return (juce::uint8) juce::jlimit(0, 255, (int) std::lround(v01 * 255.0f));
+            };
+
+            std::vector<juce::uint8> rawPixels((size_t) textureWidth * 4);
+            std::vector<juce::uint8> rawMidPixels((size_t) textureWidth * 4);
+
+            for (int t = 0; t < textureWidth; ++t)
+            {
+                const auto& b = rawBlocks[(size_t) t];
+                rawPixels[(size_t) t * 4 + 0] = toByteRaw(b.minValue * 0.5f + 0.5f);
+                rawPixels[(size_t) t * 4 + 1] = toByteRaw(b.maxValue * 0.5f + 0.5f);
+                rawPixels[(size_t) t * 4 + 2] = toByteRaw(b.lowEnergy);
+                rawPixels[(size_t) t * 4 + 3] = toByteRaw(b.highEnergy);
+
+                rawMidPixels[(size_t) t * 4 + 0] = toByteRaw(b.midEnergy);
+                rawMidPixels[(size_t) t * 4 + 1] = 0;
+                rawMidPixels[(size_t) t * 4 + 2] = 0;
+                rawMidPixels[(size_t) t * 4 + 3] = 255;
+            }
+
+            glBindTexture(GL_TEXTURE_2D, waveformTexture);
+            if (textureWidth == allocatedTextureWidth)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, rawPixels.data());
+            else
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rawPixels.data());
+
+            glBindTexture(GL_TEXTURE_2D, midTexture);
+            if (textureWidth == allocatedTextureWidth)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, rawMidPixels.data());
+            else
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, rawMidPixels.data());
+
+            allocatedTextureWidth = textureWidth;
+            textureViewStart = (double) rawStart;
+            textureViewLength = (double) rawSpan;
+            textureDirty = false;
+            return;
+        }
+        // Fall through to the mip-pyramid path below if the raw reader
+        // isn't available for some reason (e.g. no file loaded).
     }
 
     const auto& levelBlocks = audioEngine.getMipLevel(level);
@@ -567,8 +804,23 @@ void WaveformComponent::renderOpenGL()
     // line is drawn at, every single frame.
     const double sampleRate = audioEngine.getSampleRate();
     const bool isPlayingNow = audioEngine.isPlaying();
-    const double smoothedSeconds = playheadLineTracker.update(audioEngine.getPosition(), isPlayingNow);
+    double trackerCorrectionSeconds = 0.0;
+    bool trackerWasSnap = false;
+    bool trackerWasNotPlayingReset = false;
+    const double smoothedSeconds = playheadLineTracker.update(audioEngine.getPosition(), isPlayingNow,
+                                                                &trackerCorrectionSeconds, &trackerWasSnap, &trackerWasNotPlayingReset);
     const double playheadSample = sampleRate > 0.0 ? smoothedSeconds * sampleRate : 0.0;
+
+    // Diagnostics - see the getters in the header.
+    {
+        double prevPeak = diagPeakTrackerCorrection.load();
+        const double absCorrection = std::abs(trackerCorrectionSeconds);
+        while (absCorrection > prevPeak && ! diagPeakTrackerCorrection.compare_exchange_weak(prevPeak, absCorrection))
+        {
+        }
+        if (trackerWasSnap) ++diagSnapCount;
+        if (trackerWasNotPlayingReset) ++diagNotPlayingResetCount;
+    }
 
     if (followPlayhead && isPlayingNow && sampleRate > 0.0)
     {
@@ -590,6 +842,59 @@ void WaveformComponent::renderOpenGL()
         localViewLength = viewLength;
     }
 
+    // The playhead line (further down) is deliberately drawn from this RAW,
+    // unsnapped view start so it keeps moving perfectly smoothly - only the
+    // WAVEFORM's texture mapping below gets snapped to the pixel grid.
+    const double rawViewStart = localViewStart;
+
+    // Snap the view used for the waveform's texel<->screen mapping to whole
+    // screen pixels. Without this, texMapOffset places the boundary between
+    // two texels at a continuously-varying SUB-pixel screen position as the
+    // view scrolls (e.g. during playhead-follow) - between one frame and the
+    // next that boundary can cross an entire pixel's nearest-sample point,
+    // and since each pixel commits to whichever texel it's nearest to
+    // (GL_NEAREST), the pixel's rendered value "pops" straight from one
+    // block's height to the next rather than sweeping smoothly through the
+    // AA/crossfade band, however wide that band is made - the pop is a
+    // property of the sub-pixel alignment shifting discretely between
+    // frames, not of how the boundary itself is anti-aliased. Snapping the
+    // view so a texel boundary only ever lands on an exact pixel boundary
+    // removes that sub-pixel alignment entirely: the whole waveform now
+    // shifts in whole-pixel steps, each one landing exactly where the AA
+    // band is centred, instead of drifting through it.
+    // Uses the exact same rounding (ceil, then jmax(1,...)) as
+    // uploadWaveformTexture's own pixelWidth/targetWidth - the raw-sample
+    // fallback path derives ITS bucket grid size from that same targetWidth
+    // (samplesPerBucketI - see uploadWaveformTexture), so if this snap grid
+    // were computed with different rounding it would be a slightly
+    // DIFFERENT grid, out of phase with the bucket grid. The two grids
+    // slowly drifting relative to each other as the view scrolls is what
+    // read as the waveform intermittently jumping specifically once the
+    // raw-sample fallback was active (mip levels don't have this problem -
+    // their block size comes from the fixed pyramid, not from pixelWidth,
+    // so there's no second grid to desync from).
+    const double pixelWidthForSnap = juce::jmax(1.0, std::ceil((double) getWidth() * openGLContext.getRenderingScale()));
+    const double samplesPerPixel = localViewLength / pixelWidthForSnap;
+    if (samplesPerPixel > 0.0)
+        localViewStart = std::round(localViewStart / samplesPerPixel) * samplesPerPixel;
+
+    // Diagnostics - see the getters in the header.
+    {
+        const double snappedPx = samplesPerPixel > 0.0 ? localViewStart / samplesPerPixel : 0.0;
+        diagRawViewStartSamples.store(rawViewStart);
+        diagSnappedViewStartPx.store(snappedPx);
+        if (diagPrevValid)
+        {
+            const double jumpPx = std::abs(snappedPx - diagPrevSnappedViewStartPx);
+            double prevPeak = diagPeakViewJumpPx.load();
+            while (jumpPx > prevPeak && ! diagPeakViewJumpPx.compare_exchange_weak(prevPeak, jumpPx))
+            {
+            }
+        }
+        diagPrevSnappedViewStartPx = snappedPx;
+        diagPrevValid = true;
+    }
+
     // The texture window covers many more blocks than one frame's view
     // strictly needs (see uploadWaveformTexture), so most of the time the
     // new view is still fully covered by whatever's already uploaded - only
@@ -606,6 +911,30 @@ void WaveformComponent::renderOpenGL()
 
     if (textureDirty)
         uploadWaveformTexture(localViewStart, localViewLength);
+
+    // Diagnostics - see the getters in the header. texMapScale is what
+    // actually determines how "zoomed" the rendered content looks on
+    // screen for a GIVEN view - if textureViewLength changes between
+    // rebuilds while the view's own length (zoom) does NOT, texMapScale
+    // changes too, which pops the apparent content scale even though
+    // localViewStart/Length stayed perfectly continuous - a jump the
+    // view-position diagnostics above can't see at all, since nothing
+    // about the "position" changed, just the width of texture being
+    // stretched onto it.
+    if (samplesPerPixel > 0.0)
+    {
+        diagTextureViewStartOffsetPx.store((textureViewStart - localViewStart) / samplesPerPixel);
+        if (diagPrevTextureViewStartValid && std::abs(diagPrevTextureViewLength - textureViewLength) > 0.5)
+        {
+            const double scaleJumpPct = 100.0 * std::abs(textureViewLength - diagPrevTextureViewLength) / juce::jmax(1.0, diagPrevTextureViewLength);
+            double prevPeak = diagPeakTextureWindowJumpPx.load();
+            while (scaleJumpPct > prevPeak && ! diagPeakTextureWindowJumpPx.compare_exchange_weak(prevPeak, scaleJumpPct))
+            {
+            }
+        }
+        diagPrevTextureViewLength = textureViewLength;
+        diagPrevTextureViewStartValid = true;
+    }
 
     if (shader == nullptr || textureWidth == 0)
         return;
@@ -636,12 +965,17 @@ void WaveformComponent::renderOpenGL()
     shader->setUniform("smoothing", params.smoothing);
     shader->setUniform("pixelHeight", (float) getHeight() * (float) openGLContext.getRenderingScale());
     shader->setUniform("pixelWidth", (float) getWidth() * (float) openGLContext.getRenderingScale());
+    shader->setUniform("heightScale", juce::jlimit(0.01f, 1.0f, params.waveformHeight));
 
     // playheadSample was already computed above (and used to centre the
     // view, when following) - reused here so the line is guaranteed to
     // land exactly at the view's centre while following, every frame.
     const bool playheadVisible = audioEngine.hasFileLoaded();
-    const float playheadViewFrac = localViewLength > 0.0 ? (float) ((playheadSample - localViewStart) / localViewLength) : 0.0f;
+    // Uses rawViewStart (not the pixel-snapped localViewStart used for the
+    // waveform's texture mapping above) so the line keeps tracking the true,
+    // continuous view position and stays perfectly smooth rather than
+    // stepping in whole-pixel jumps along with the waveform content.
+    const float playheadViewFrac = localViewLength > 0.0 ? (float) ((playheadSample - rawViewStart) / localViewLength) : 0.0f;
     shader->setUniform("playheadViewFrac", playheadViewFrac);
     shader->setUniform("playheadVisible", playheadVisible ? 1.0f : 0.0f);
     shader->setUniform("centreLineAlpha", params.centreLineAlpha);

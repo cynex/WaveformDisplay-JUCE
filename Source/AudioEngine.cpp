@@ -28,6 +28,10 @@ bool AudioEngine::loadFile(const juce::File& file)
 
     analyse(*reader);
 
+    // A second, independent reader for the same file - see the member
+    // comment on rawReader for why this can't just reuse readerSource's.
+    rawReader.reset(formatManager.createReaderFor(file));
+
     auto newSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
     transportSource.setSource(newSource.get(), 0, nullptr, sourceSampleRate);
     readerSource = std::move(newSource);
@@ -119,7 +123,9 @@ void AudioEngine::analyse(juce::AudioFormatReader& reader)
         samplePos += thisBlockSize;
     }
 
-    // Normalise low/mid/high energy across the whole file to 0..1 for consistent tinting.
+    // Normalise low/mid/high energy across the whole file to 0..1 for
+    // consistent tinting. Stashed on the instance too so getRawBlocks() can
+    // apply the identical scale to its on-demand blocks.
     float maxLow = 0.0001f, maxMid = 0.0001f, maxHigh = 0.0001f;
     for (auto& wb : blocks)
     {
@@ -133,6 +139,9 @@ void AudioEngine::analyse(juce::AudioFormatReader& reader)
         wb.midEnergy = juce::jlimit(0.0f, 1.0f, wb.midEnergy / maxMid);
         wb.highEnergy = juce::jlimit(0.0f, 1.0f, wb.highEnergy / maxHigh);
     }
+    normMaxLowEnergy = maxLow;
+    normMaxMidEnergy = maxMid;
+    normMaxHighEnergy = maxHigh;
 
     // Normalise the peak envelope to -1..1 too. Some readers/formats don't
     // hand back samples in a clean -1..1 range (e.g. slightly hot masters,
@@ -149,8 +158,10 @@ void AudioEngine::analyse(juce::AudioFormatReader& reader)
     // crush every other (genuinely -1..1) block down towards silence.
     const float scaleDivisor = juce::jmin(peakAbs, 2.0f);
 
+    normPeakScaleDivisor = 1.0f;
     if (peakAbs > 1.05f || peakAbs < 0.5f)
     {
+        normPeakScaleDivisor = scaleDivisor;
         for (auto& wb : blocks)
         {
             wb.minValue = juce::jlimit(-1.0f, 1.0f, wb.minValue / scaleDivisor);
@@ -225,4 +236,118 @@ double AudioEngine::getPosition() const
 double AudioEngine::getLengthInSeconds() const
 {
     return transportSource.getLengthInSeconds();
+}
+
+bool AudioEngine::getRawBlocks(juce::int64 startSample, juce::int64 spanSamples, int numBuckets, std::vector<WaveformBlock>& outBlocks) const
+{
+    if (rawReader == nullptr || numBuckets <= 0 || spanSamples <= 0 || totalNumSamples <= 0)
+        return false;
+
+    startSample = juce::jlimit<juce::int64>(0, juce::jmax<juce::int64>(0, totalNumSamples - 1), startSample);
+    spanSamples = juce::jmin(spanSamples, totalNumSamples - startSample);
+    if (spanSamples <= 0)
+        return false;
+
+    // Extra samples read BEFORE startSample purely to warm up the one-pole
+    // filters below (see the loop) - never turned into bucket data
+    // themselves. analyse() runs its identical filters continuously across
+    // the WHOLE file, so its energy values reflect fully-settled filter
+    // state everywhere; here each rebuild instead starts a fresh window from
+    // startSample with the filters reset to 0. Right at this window's start
+    // that gives a different low/mid/high split than analyse() would have
+    // produced for the exact same audio - normally not visible since it
+    // settles out within the margin before reaching the visible view, but
+    // at deep zoom the margin itself can be just a few hundred samples,
+    // less than the 300Hz low band needs to settle (~5 time constants,
+    // roughly 2650 samples at 44.1kHz) - so the visible start of the window
+    // showed a DIFFERENT tint each rebuild depending on how much settling
+    // time that particular window's margin happened to give it, which read
+    // as the whole waveform intermittently jumping/flashing. 8000 samples
+    // (~180ms at 44.1kHz) comfortably covers that settling time regardless
+    // of zoom.
+    constexpr juce::int64 filterPrerollSamples = 8000;
+    const juce::int64 prerollStart = juce::jmax<juce::int64>(0, startSample - filterPrerollSamples);
+    const juce::int64 prerollCount = startSample - prerollStart;
+    const juce::int64 readCount = prerollCount + spanSamples;
+
+    const int numChannels = juce::jmax(1, (int) rawReader->numChannels);
+    juce::AudioBuffer<float> buffer(numChannels, (int) readCount);
+    if (! rawReader->read(&buffer, 0, (int) readCount, prerollStart, true, true))
+        return false;
+
+    outBlocks.assign((size_t) numBuckets, WaveformBlock());
+
+    // Same three-band one-pole split as analyse() - see the comment there -
+    // run continuously across the whole span (not reset per bucket) so the
+    // filter state, and so the resulting energy split, matches what
+    // analyse() would have produced for this same stretch of audio.
+    float lowLpState = 0.0f;
+    float midLpState = 0.0f;
+    const float cutoffLowHz = 300.0f;
+    const float cutoffHighHz = 3000.0f;
+    const float dt = 1.0f / (float) sourceSampleRate;
+    const float rcLow = 1.0f / (2.0f * juce::MathConstants<float>::pi * cutoffLowHz);
+    const float rcHigh = 1.0f / (2.0f * juce::MathConstants<float>::pi * cutoffHighHz);
+    const float alphaLow = dt / (rcLow + dt);
+    const float alphaHigh = dt / (rcHigh + dt);
+
+    std::vector<float> lowSumSq((size_t) numBuckets, 0.0f);
+    std::vector<float> midSumSq((size_t) numBuckets, 0.0f);
+    std::vector<float> highSumSq((size_t) numBuckets, 0.0f);
+    std::vector<int> bucketCount((size_t) numBuckets, 0);
+
+    for (juce::int64 i = 0; i < readCount; ++i)
+    {
+        float sample = 0.0f;
+        for (int ch = 0; ch < numChannels; ++ch)
+            sample += buffer.getSample(ch, (int) i);
+        sample /= (float) numChannels;
+        sample = juce::jlimit(-4.0f, 4.0f, sample);
+
+        lowLpState += alphaLow * (sample - lowLpState);
+        midLpState += alphaHigh * (sample - midLpState);
+        const float midVal = midLpState - lowLpState;
+        const float highVal = sample - midLpState;
+
+        if (i < prerollCount)
+            continue; // warm-up only - not part of any output bucket
+
+        const juce::int64 spanIndex = i - prerollCount;
+        int bucket = (int) ((double) spanIndex * (double) numBuckets / (double) spanSamples);
+        bucket = juce::jlimit(0, numBuckets - 1, bucket);
+
+        auto& wb = outBlocks[(size_t) bucket];
+        auto& count = bucketCount[(size_t) bucket];
+        if (count == 0)
+        {
+            wb.minValue = sample;
+            wb.maxValue = sample;
+        }
+        else
+        {
+            wb.minValue = juce::jmin(wb.minValue, sample);
+            wb.maxValue = juce::jmax(wb.maxValue, sample);
+        }
+        lowSumSq[(size_t) bucket] += lowLpState * lowLpState;
+        midSumSq[(size_t) bucket] += midVal * midVal;
+        highSumSq[(size_t) bucket] += highVal * highVal;
+        ++count;
+    }
+
+    // Apply the SAME whole-file normalisation analyse() used, so these
+    // on-demand blocks read consistently with the rest of the mip pyramid
+    // instead of jumping in brightness/scale right at the zoom level where
+    // this fallback kicks in.
+    for (int b = 0; b < numBuckets; ++b)
+    {
+        auto& wb = outBlocks[(size_t) b];
+        const int count = bucketCount[(size_t) b];
+        wb.lowEnergy = count > 0 ? juce::jlimit(0.0f, 1.0f, std::sqrt(lowSumSq[(size_t) b] / (float) count) / normMaxLowEnergy) : 0.0f;
+        wb.midEnergy = count > 0 ? juce::jlimit(0.0f, 1.0f, std::sqrt(midSumSq[(size_t) b] / (float) count) / normMaxMidEnergy) : 0.0f;
+        wb.highEnergy = count > 0 ? juce::jlimit(0.0f, 1.0f, std::sqrt(highSumSq[(size_t) b] / (float) count) / normMaxHighEnergy) : 0.0f;
+        wb.minValue = juce::jlimit(-1.0f, 1.0f, wb.minValue / normPeakScaleDivisor);
+        wb.maxValue = juce::jlimit(-1.0f, 1.0f, wb.maxValue / normPeakScaleDivisor);
+    }
+
+    return true;
 }

@@ -76,6 +76,8 @@ private:
     juce::Slider smoothingSlider;
     juce::Label centreLineAlphaLabel{ {}, "Centre Line" };
     juce::Slider centreLineAlphaSlider;
+    juce::Label waveformHeightLabel{ {}, "Waveform Height" };
+    juce::Slider waveformHeightSlider;
 
     WaveformParameters params;
 

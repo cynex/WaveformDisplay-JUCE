@@ -34,6 +34,7 @@ private:
     juce::ToggleButton followPlayheadButton{ "Follow Playhead" };
     juce::Label fileLabel{ {}, "No file loaded" };
     juce::Label frameTimeLabel;
+    juce::Label zoomLabel;
 
     WaveformComponent waveform{ audioEngine };
     WaveformScrollbar scrollbar;

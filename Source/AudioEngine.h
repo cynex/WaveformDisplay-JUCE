@@ -65,6 +65,18 @@ public:
 
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
+    // Computes numBuckets WaveformBlocks directly from raw decoded samples
+    // spanning [startSample, startSample + spanSamples), rather than from
+    // the fixed-size mip pyramid - used when the view is zoomed in far
+    // enough that even mip level 0's fixed block size is coarser than one
+    // screen pixel, so the pyramid alone can't show any more detail. Uses a
+    // reader instance dedicated to this (see rawReader below), independent
+    // of the one driving playback, so a lookup here (called from the GL
+    // thread) never races the audio thread's own decode calls. Returns
+    // false if there's no file loaded, or the range/bucket count is
+    // degenerate.
+    bool getRawBlocks(juce::int64 startSample, juce::int64 spanSamples, int numBuckets, std::vector<WaveformBlock>& outBlocks) const;
+
 private:
     void analyse(juce::AudioFormatReader& reader);
     void buildMipLevels();
@@ -75,10 +87,26 @@ private:
     juce::AudioTransportSource transportSource;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
 
+    // Dedicated to getRawBlocks() above - deliberately a second, independent
+    // reader rather than reusing readerSource's, so on-demand lookups from
+    // the GL thread can't race the audio thread's decode calls on the same
+    // AudioFormatReader instance during playback.
+    std::unique_ptr<juce::AudioFormatReader> rawReader;
+
     std::vector<std::vector<WaveformBlock>> mipLevels;
     int samplesPerBlock = 512;
     double sourceSampleRate = 44100.0;
     juce::int64 totalNumSamples = 0;
+
+    // Whole-file normalisation factors computed once in analyse() and
+    // reapplied by getRawBlocks(), so raw-sample-fallback blocks are scaled
+    // identically to the mip pyramid's blocks instead of looking
+    // inconsistently louder/dimmer right at the zoom level where the
+    // fallback kicks in.
+    float normMaxLowEnergy = 0.0001f;
+    float normMaxMidEnergy = 0.0001f;
+    float normMaxHighEnergy = 0.0001f;
+    float normPeakScaleDivisor = 1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioEngine)
 };
