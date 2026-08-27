@@ -1,0 +1,58 @@
+# Build output (CMake build directory used by build.bat / README instructions)
+build/
+build-*/
+out/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+CMakeUserPresets.json
+
+# Visual Studio / MSVC
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+*.ipch
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.iobj
+*.ipdb
+
+# Build artefacts that could end up at the repo root if built there
+*.exe
+*.dll
+*.lib
+*.exp
+
+# JUCE / Projucer generated (this project uses CMake, not a .jucer file,
+# but ignore these in case one gets added later)
+JuceLibraryCode/
+*.jucer.bak
+
+# Other editors/IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Temporary diagnostic logs written by WaveformComponent/AudioEngine during
+# debugging sessions (see README "Development history") - never meant to be
+# committed, just left on disk locally if debugging is re-enabled.
+debug_*.log
