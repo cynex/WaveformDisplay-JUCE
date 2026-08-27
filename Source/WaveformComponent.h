@@ -66,6 +66,7 @@ public:
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
 
     // juce::OpenGLRenderer
     void newOpenGLContextCreated() override;
@@ -77,6 +78,7 @@ private:
     void uploadWaveformTexture(double viewStartSamples, double viewLengthSamples);
     void buildShaders();
     void clampView();
+    void seekToScreenX(float screenX);
 
     // AudioEngine::getPosition() only actually CHANGES value once per audio
     // device callback buffer (commonly every ~10-30ms, sometimes more) -
@@ -219,6 +221,7 @@ private:
 
     double dragStartViewStart = 0.0;
     juce::Point<float> dragStartMouse;
+    bool draggedPastClickThreshold = false;
 
     mutable juce::CriticalSection dataLock;
 

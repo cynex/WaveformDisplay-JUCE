@@ -31,6 +31,7 @@ private:
     juce::TextButton openButton{ "Open..." };
     juce::TextButton playButton{ "Play" };
     juce::TextButton stopButton{ "Stop" };
+    juce::TextButton rewindButton{ "<<" };
     juce::ToggleButton followPlayheadButton{ "Follow Playhead" };
     juce::Label fileLabel{ {}, "No file loaded" };
     juce::Label frameTimeLabel;

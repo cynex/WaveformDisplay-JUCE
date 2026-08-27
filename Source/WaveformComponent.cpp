@@ -307,10 +307,23 @@ void WaveformComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::Mo
     setViewRange(newStart, newLength);
 }
 
+void WaveformComponent::seekToScreenX(float screenX)
+{
+    const double total = getTotalLength();
+    const double sampleRate = audioEngine.getSampleRate();
+    if (total > 0.0 && sampleRate > 0.0 && getWidth() > 0)
+    {
+        const double relX = juce::jlimit(0.0, 1.0, (double) screenX / (double) getWidth());
+        const double sampleUnderCursor = juce::jlimit(0.0, total, viewStart + relX * viewLength);
+        audioEngine.setPosition(sampleUnderCursor / sampleRate);
+    }
+}
+
 void WaveformComponent::mouseDown(const juce::MouseEvent& e)
 {
     dragStartViewStart = viewStart;
     dragStartMouse = e.position;
+    draggedPastClickThreshold = false;
 }
 
 void WaveformComponent::mouseDrag(const juce::MouseEvent& e)
@@ -320,8 +333,31 @@ void WaveformComponent::mouseDrag(const juce::MouseEvent& e)
         return;
 
     const float dx = e.position.x - dragStartMouse.x;
+
+    // Only committing to a pan once the drag has moved a few pixels (rather
+    // than on every mouseDrag, which fires even for a near-zero-movement
+    // click) keeps a plain click from being treated as a pan - see mouseUp,
+    // which is what actually seeks the playhead for a genuine click. Without
+    // this distinction, seeking on mouseDown moved the playhead (and, while
+    // follow-playhead is on and playing, immediately recentred the view)
+    // before the drag's own pan had a chance to take over, reading as a
+    // spurious jump/flutter at the start of every click-drag.
+    if (!draggedPastClickThreshold && std::abs(dx) < 3.0f)
+        return;
+
+    draggedPastClickThreshold = true;
+
     const double samplesPerPixel = viewLength / (double) getWidth();
     setViewRange(dragStartViewStart - dx * samplesPerPixel, viewLength);
+}
+
+void WaveformComponent::mouseUp(const juce::MouseEvent& e)
+{
+    // A genuine click (not a pan) seeks the playhead to wherever the cursor
+    // landed - deferred to mouseUp rather than mouseDown so a click-drag pan
+    // never has its start point misread as a seek (see mouseDrag).
+    if (!draggedPastClickThreshold)
+        seekToScreenX(e.position.x);
 }
 
 void WaveformComponent::timerCallback()

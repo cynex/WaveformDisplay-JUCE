@@ -5,6 +5,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(openButton);
     addAndMakeVisible(playButton);
     addAndMakeVisible(stopButton);
+    addAndMakeVisible(rewindButton);
     addAndMakeVisible(followPlayheadButton);
     addAndMakeVisible(fileLabel);
     addAndMakeVisible(waveform);
@@ -23,7 +24,11 @@ MainComponent::MainComponent()
     openButton.onClick = [this] { openFileChooser(); };
     playButton.onClick = [this] { audioEngine.play(); };
     stopButton.onClick = [this] { audioEngine.stop(); };
+    rewindButton.onClick = [this] { audioEngine.setPosition(0.0); };
     followPlayheadButton.onClick = [this] { waveform.setFollowPlayhead(followPlayheadButton.getToggleState()); };
+
+    followPlayheadButton.setToggleState(true, juce::dontSendNotification);
+    waveform.setFollowPlayhead(true);
 
     waveform.onViewRangeChanged = [this]
     {
@@ -66,6 +71,8 @@ void MainComponent::resized()
     playButton.setBounds(topBar.removeFromLeft(70));
     topBar.removeFromLeft(4);
     stopButton.setBounds(topBar.removeFromLeft(70));
+    topBar.removeFromLeft(4);
+    rewindButton.setBounds(topBar.removeFromLeft(40));
     topBar.removeFromLeft(8);
     followPlayheadButton.setBounds(topBar.removeFromLeft(140));
     topBar.removeFromLeft(8);
@@ -139,6 +146,7 @@ void MainComponent::timerCallback()
 {
     playButton.setEnabled(audioEngine.hasFileLoaded());
     stopButton.setEnabled(audioEngine.hasFileLoaded());
+    rewindButton.setEnabled(audioEngine.hasFileLoaded());
 
     juce::String stats;
     stats << "Draw: " << juce::String(waveform.getLastDrawCallMs(), 3) << " ms"

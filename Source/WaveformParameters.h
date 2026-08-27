@@ -42,5 +42,5 @@ struct WaveformParameters
 
     // Opacity (0..1) of a solid white 1px horizontal line drawn through the
     // vertical centre of the waveform (the zero-amplitude axis). 0 hides it entirely.
-    float centreLineAlpha = 0.3f;
+    float centreLineAlpha = 1.0f;
 };
