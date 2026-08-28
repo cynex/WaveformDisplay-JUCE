@@ -73,6 +73,13 @@ public:
     void setFollowPlayhead(bool shouldFollow) { followPlayhead = shouldFollow; }
     bool getFollowPlayhead() const { return followPlayhead; }
 
+    /** Call after changing AudioEngine's playback position from outside this
+        class (e.g. a rewind button) while paused. Continuous repainting is
+        off whenever nothing's playing, so a position change made without
+        going through this component's own mouse handling would otherwise
+        sit unseen until something else asked for a redraw. */
+    void notifyPositionChangedExternally() { openGLContext.triggerRepaint(); }
+
     /** Wall-clock time the last GL draw call (glDrawArrays for the waveform quad) took, in milliseconds. */
     double getLastDrawCallMs() const { return lastDrawCallMs.load(); }
     /** Highest getLastDrawCallMs() has been since the app started. */
@@ -310,6 +317,11 @@ private:
     // atomic so that handoff is properly visible across threads.
     std::atomic<bool> textureDirty { true };
     int textureWidth = 0;
+
+    // Message-thread-only: mirrors whatever openGLContext.setContinuousRepainting()
+    // was last actually called with, so timerCallback() only calls it again
+    // (a real, if small, cost) on an actual change instead of every tick.
+    bool continuousRepaintActive = false;
 
     // Wall-clock duration of the last glDrawArrays call, and the highest
     // that's ever been, for the on-screen frame-time readout. Written on

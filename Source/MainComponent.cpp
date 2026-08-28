@@ -24,7 +24,7 @@ MainComponent::MainComponent()
     openButton.onClick = [this] { openFileChooser(); };
     playButton.onClick = [this] { audioEngine.play(); };
     stopButton.onClick = [this] { audioEngine.stop(); };
-    rewindButton.onClick = [this] { audioEngine.setPosition(0.0); };
+    rewindButton.onClick = [this] { audioEngine.setPosition(0.0); waveform.notifyPositionChangedExternally(); };
     followPlayheadButton.onClick = [this] { waveform.setFollowPlayhead(followPlayheadButton.getToggleState()); };
 
     followPlayheadButton.setToggleState(true, juce::dontSendNotification);

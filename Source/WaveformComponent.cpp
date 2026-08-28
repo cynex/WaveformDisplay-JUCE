@@ -225,6 +225,15 @@ namespace
             // box-filtered supersampling) and average them, rather than a
             // single sample at the pixel centre. See sampleWaveform's
             // comment for what this is actually fixing.
+            //
+            // Always on, unconditionally - an earlier version skipped the
+            // second sample on frames where the view hadn't moved, as an
+            // optimisation. Removed: switching between the two-sample
+            // average and a single centred sample changes the anti-aliased
+            // edge coverage by a small but visible amount, which read as a
+            // pop/flicker right at the moment a click-drag transitioned
+            // from a static frame into a moving one - worse than the cost
+            // it was saving.
             float pixelToNormX = 1.0 / max(pixelWidth, 1.0);
             float sampleOffset = pixelToNormX * 0.25;
 
@@ -281,15 +290,27 @@ WaveformComponent::WaveformComponent(AudioEngine& engine)
     // position directly from AudioEngine, fresh, so motion stays smooth
     // regardless of how the GL thread's cadence relates to the
     // message-thread timer below.
-    openGLContext.setContinuousRepainting(true);
+    //
+    // Only actually WANTED while something is continuously animating
+    // (playback/scratching moving the playhead, or follow-playhead moving
+    // the view with it) - timerCallback() below flips it on/off to match
+    // AudioEngine::isPlaying(), so an idle, paused view stops redrawing
+    // every vsync for no reason. Discrete changes while idle (panning,
+    // zooming, resizing, editing parameters) stay responsive without it -
+    // each already calls triggerRepaint() itself (setViewRange,
+    // setParameters, the background build thread's completion signal).
+    // Starts false: nothing is loaded/playing yet at construction.
+    openGLContext.setContinuousRepainting(false);
     // JUCE defaults this to 1 (vsync on) already; set it explicitly so
-    // continuous repainting is definitely paced by the display refresh and
-    // not free-running (which can tear/look inconsistent) on whatever
-    // platform/driver combination this ends up running on.
+    // continuous repainting, whenever it's on, is definitely paced by the
+    // display refresh and not free-running (which can tear/look
+    // inconsistent) on whatever platform/driver combination this ends up
+    // running on.
     openGLContext.setSwapInterval(1);
-    // This timer no longer triggers repaints itself - it just periodically
-    // recentres the view during follow-playhead, which has to happen on the
-    // message thread (setViewRange touches the scrollbar Component).
+    // Also drives the continuous-repainting on/off switch above, and
+    // periodically recentres the view during follow-playhead, which has to
+    // happen on the message thread (setViewRange touches the scrollbar
+    // Component).
     startTimerHz(60);
 
     startThread();
@@ -428,6 +449,13 @@ void WaveformComponent::resized()
     // The texture is now sized to roughly match the component's pixel
     // width (see uploadWaveformTexture), so a resize needs a rebuild too.
     textureDirty = true;
+
+    // Explicit rather than relying on the resize itself implicitly causing
+    // a repaint - true often enough, but not guaranteed on every platform,
+    // and now that continuous repainting is off while idle (see the
+    // constructor), this is the only thing that would otherwise ask for a
+    // redraw at all.
+    openGLContext.triggerRepaint();
 }
 
 void WaveformComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -457,6 +485,14 @@ void WaveformComponent::seekToScreenX(float screenX)
         const double relX = juce::jlimit(0.0, 1.0, (double) screenX / (double) getWidth());
         const double sampleUnderCursor = juce::jlimit(0.0, total, viewStart + relX * viewLength);
         audioEngine.setPosition(sampleUnderCursor / sampleRate);
+
+        // Continuous repainting is off whenever nothing's playing (see the
+        // constructor) - moving the playhead line while paused is a
+        // discrete change like a pan or zoom, so it needs its own explicit
+        // repaint the same way those get one, or the new position wouldn't
+        // actually show up on screen until something else (like a pan)
+        // happened to ask for a redraw anyway.
+        openGLContext.triggerRepaint();
     }
 }
 
@@ -557,6 +593,20 @@ void WaveformComponent::mouseUp(const juce::MouseEvent& e)
 
 void WaveformComponent::timerCallback()
 {
+    // Continuous repainting (see the constructor's comment) is only worth
+    // paying for while something is actually animating on its own, without
+    // any further input - playback or scratching moving the playhead, and
+    // (while enabled) the view following it. Checked here rather than
+    // wherever play/scratch state changes so there's exactly one place that
+    // owns the on/off decision, and so it stays correct without every
+    // caller of play()/beginScratch()/etc. needing to remember to toggle it.
+    const bool shouldBeContinuous = audioEngine.isPlaying();
+    if (shouldBeContinuous != continuousRepaintActive)
+    {
+        openGLContext.setContinuousRepainting(shouldBeContinuous);
+        continuousRepaintActive = shouldBeContinuous;
+    }
+
     // The view itself is now recentred directly from renderOpenGL (GL
     // thread) every frame while following, using the exact same playhead
     // reading the line is drawn from - see the comment there for why. This
