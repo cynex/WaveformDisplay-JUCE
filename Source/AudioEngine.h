@@ -42,6 +42,19 @@ public:
     double getLengthInSeconds() const;
     bool hasFileLoaded() const { return readerSource != nullptr; }
 
+    // --- Scratching -------------------------------------------------------
+    // Turntable-style scratching: while active, playback is driven entirely
+    // by setScratchTargetSeconds() rather than the transport's own steady
+    // 1x clock - the audio thread continuously chases whatever position was
+    // last set, so the actual speed/direction audio plays back at (and so
+    // its pitch, exactly like a real turntable) is however fast that target
+    // is moving, not a fixed rate. See ScratchSource in AudioEngine.cpp.
+    void beginScratch();
+    void setScratchTargetSeconds(double seconds);
+    void endScratch();
+    bool isScratching() const { return scratchActive; }
+    // -----------------------------------------------------------------------
+
     juce::AudioTransportSource& getTransportSource() { return transportSource; }
 
     int getNumSamplesPerBlock() const { return samplesPerBlock.load(); }
@@ -81,11 +94,28 @@ private:
     void analyse(juce::AudioFormatReader& reader, MipPyramid& outPyramid);
     void buildMipLevels(MipPyramid& pyramid);
 
+    // A custom AudioSource that owns its own AudioFormatReader (a second,
+    // independent reader on the same file - readers aren't safe to share
+    // between two things reading different positions concurrently) and
+    // continuously chases an externally-set "desired position" rather than
+    // advancing at a fixed rate. Defined in AudioEngine.cpp; only AudioEngine
+    // constructs one, in beginScratch().
+    class ScratchSource;
+
     juce::AudioFormatManager formatManager;
     juce::AudioDeviceManager deviceManager;
     juce::AudioSourcePlayer audioSourcePlayer;
     juce::AudioTransportSource transportSource;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource;
+
+    juce::File loadedFile;
+    std::unique_ptr<juce::AudioFormatReader> scratchReader;
+    std::unique_ptr<ScratchSource> scratchSource;
+    bool scratchActive = false;
+    // Whether the transport was actually playing when scratching began, so
+    // endScratch() can resume playback only if it should - scratching while
+    // paused would otherwise leave the transport playing afterwards.
+    bool wasPlayingBeforeScratch = false;
 
     // Published atomically (see getMipPyramid) each loadFile(); never
     // mutated in place after publishing, so any thread holding a copy of

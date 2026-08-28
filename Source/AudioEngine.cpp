@@ -1,5 +1,133 @@
 #include "AudioEngine.h"
 
+// Drives playback from a continuously-updated "desired position" instead of
+// a fixed 1x clock, so the actual speed/direction (and so pitch) audio comes
+// out at is however fast that target is moving - a real turntable scratch,
+// not a series of silent seeks. Owns its own AudioFormatReader (a second
+// instance on the same file) so it never contends with the transport's
+// reader, which stays untouched and ready to resume normal playback the
+// instant scratching ends.
+//
+// Random-access reads for every single output sample would be far too slow
+// (and, for compressed formats like mp3/ogg, glitchy - each read demands
+// the decoder reset/seek internally). Instead a windowed cache of decoded
+// samples is kept around the current read position and refilled in whole
+// chunks whenever the position strays near its edge, so the inner per-sample
+// loop only ever touches an in-memory buffer.
+class AudioEngine::ScratchSource : public juce::AudioSource
+{
+public:
+    explicit ScratchSource(juce::AudioFormatReader& readerIn) : reader(readerIn)
+    {
+        cache.setSize((int) juce::jmax<juce::int64>(1, reader.numChannels), cacheLengthSamples);
+    }
+
+    void setPositionSamples(double samples)
+    {
+        currentPosition = juce::jlimit(0.0, maxPosition(), samples);
+        desiredPosition.store(currentPosition);
+        refillCache(currentPosition);
+    }
+
+    // Called continuously from the UI thread as the mouse moves - just
+    // records where playback should be heading towards. The audio thread
+    // (getNextAudioBlock) is what actually walks currentPosition towards
+    // this, at whatever rate that takes, which is what produces the
+    // scratch sound rather than a silent jump.
+    void setDesiredPositionSamples(double samples)
+    {
+        desiredPosition.store(juce::jlimit(0.0, maxPosition(), samples));
+    }
+
+    double getCurrentPositionSeconds() const
+    {
+        return reader.sampleRate > 0.0 ? currentPosition / reader.sampleRate : 0.0;
+    }
+
+    double getSampleRate() const { return reader.sampleRate; }
+
+    void prepareToPlay(int, double) override {}
+    void releaseResources() override {}
+
+    void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override
+    {
+        auto& buffer = *bufferToFill.buffer;
+        const int outChannels = buffer.getNumChannels();
+        const int cacheChannels = cache.getNumChannels();
+        const double target = desiredPosition.load();
+
+        for (int i = 0; i < bufferToFill.numSamples; ++i)
+        {
+            // One-pole follow towards the target position, evaluated once
+            // per OUTPUT sample rather than once per block, so the actual
+            // playback speed (and therefore pitch) stays smooth within a
+            // block instead of jumping in block-sized steps. followCoeff is
+            // sized for a ~20ms time constant - fast enough to feel directly
+            // responsive to the mouse, slow enough that a jittery run of
+            // mouse-move events doesn't produce an audibly stepped/clicky
+            // scratch.
+            currentPosition += (target - currentPosition) * followCoeff;
+            currentPosition = juce::jlimit(0.0, maxPosition(), currentPosition);
+
+            if (currentPosition < cacheStart + cacheEdgeMargin
+                || currentPosition > cacheStart + cacheValidLength - cacheEdgeMargin)
+                refillCache(currentPosition);
+
+            // Linear-interpolate between the two neighbouring cached
+            // samples - this is what actually produces the scratch's pitch
+            // shift (reading faster than 1x per output sample raises pitch,
+            // slower lowers it, negative reverses it), same as a real
+            // turntable's needle following a groove at non-1x speed.
+            const double localPos = currentPosition - (double) cacheStart;
+            const int idx0 = juce::jlimit(0, cacheValidLength - 1, (int) std::floor(localPos));
+            const int idx1 = juce::jlimit(0, cacheValidLength - 1, idx0 + 1);
+            const float frac = (float) (localPos - (double) idx0);
+
+            for (int ch = 0; ch < outChannels; ++ch)
+            {
+                const int srcCh = juce::jmin(ch, cacheChannels - 1);
+                const float s0 = cache.getSample(srcCh, idx0);
+                const float s1 = cache.getSample(srcCh, idx1);
+                const float sample = s0 + (s1 - s0) * frac;
+                buffer.setSample(ch, bufferToFill.startSample + i, sample);
+            }
+        }
+    }
+
+private:
+    double maxPosition() const
+    {
+        return (double) juce::jmax<juce::int64>(0, reader.lengthInSamples - 1);
+    }
+
+    void refillCache(double centerPosition)
+    {
+        juce::int64 start = (juce::int64) centerPosition - cacheLengthSamples / 2;
+        start = juce::jlimit<juce::int64>(0, juce::jmax<juce::int64>(0, reader.lengthInSamples - cacheLengthSamples), start);
+
+        const int numToRead = (int) juce::jmin<juce::int64>(cacheLengthSamples, reader.lengthInSamples - start);
+        if (numToRead > 0)
+            reader.read(&cache, 0, numToRead, start, true, true);
+
+        cacheStart = start;
+        cacheValidLength = juce::jmax(1, numToRead);
+    }
+
+    juce::AudioFormatReader& reader;
+
+    static constexpr int cacheLengthSamples = 1 << 17; // ~3s at 44.1kHz
+    static constexpr int cacheEdgeMargin = 1 << 14;     // ~0.37s - refill before running off the cached window
+    juce::AudioBuffer<float> cache;
+    juce::int64 cacheStart = 0;
+    int cacheValidLength = 0;
+
+    double currentPosition = 0.0;       // audio-thread-only
+    std::atomic<double> desiredPosition { 0.0 }; // written by the UI thread
+
+    // 1 - exp(-1 / (tau * sampleRate)), tau = 0.02s - see the comment above.
+    const float followCoeff = (float) (1.0 - std::exp(-1.0 / (0.02 * juce::jmax(1.0, reader.sampleRate))));
+};
+
 AudioEngine::AudioEngine()
 {
     formatManager.registerBasicFormats(); // wav, aiff, flac, ogg vorbis, mp3 (decode-only)
@@ -23,6 +151,10 @@ bool AudioEngine::loadFile(const juce::File& file)
     if (reader == nullptr)
         return false;
 
+    if (scratchActive)
+        endScratch();
+
+    loadedFile = file;
     sourceSampleRate = reader->sampleRate;
     totalNumSamples = reader->lengthInSamples;
 
@@ -211,7 +343,11 @@ void AudioEngine::stop()
 
 bool AudioEngine::isPlaying() const
 {
-    return transportSource.isPlaying();
+    // Scratching counts as "playing" for callers like WaveformComponent's
+    // follow-playhead/playhead-line logic - transportSource itself is
+    // stopped for the duration (see beginScratch), so relying on it alone
+    // would report not-playing right when the position is moving the most.
+    return scratchActive || transportSource.isPlaying();
 }
 
 void AudioEngine::setPosition(double seconds)
@@ -221,10 +357,60 @@ void AudioEngine::setPosition(double seconds)
 
 double AudioEngine::getPosition() const
 {
+    if (scratchActive && scratchSource != nullptr)
+        return scratchSource->getCurrentPositionSeconds();
     return transportSource.getCurrentPosition();
 }
 
 double AudioEngine::getLengthInSeconds() const
 {
     return transportSource.getLengthInSeconds();
+}
+
+void AudioEngine::beginScratch()
+{
+    if (readerSource == nullptr || scratchActive)
+        return;
+
+    scratchReader.reset(formatManager.createReaderFor(loadedFile));
+    if (scratchReader == nullptr)
+        return;
+
+    wasPlayingBeforeScratch = transportSource.isPlaying();
+
+    scratchSource = std::make_unique<ScratchSource>(*scratchReader);
+    scratchSource->setPositionSamples(transportSource.getCurrentPosition() * scratchReader->sampleRate);
+
+    // Stop the transport (rather than leaving it running underneath) so its
+    // reader isn't also being pulled from while scratchReader plays - the
+    // two would otherwise both be "the current position" at once, and
+    // resuming afterwards should continue from wherever scratching left off,
+    // not from wherever the transport's own clock had independently gotten to.
+    transportSource.stop();
+
+    audioSourcePlayer.setSource(scratchSource.get());
+    scratchActive = true;
+}
+
+void AudioEngine::setScratchTargetSeconds(double seconds)
+{
+    if (scratchSource != nullptr)
+        scratchSource->setDesiredPositionSamples(seconds * scratchSource->getSampleRate());
+}
+
+void AudioEngine::endScratch()
+{
+    if (!scratchActive)
+        return;
+
+    const double finalSeconds = scratchSource != nullptr ? scratchSource->getCurrentPositionSeconds() : transportSource.getCurrentPosition();
+
+    audioSourcePlayer.setSource(&transportSource);
+    transportSource.setPosition(finalSeconds);
+    if (wasPlayingBeforeScratch)
+        transportSource.start();
+
+    scratchSource.reset();
+    scratchReader.reset();
+    scratchActive = false;
 }

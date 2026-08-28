@@ -30,6 +30,17 @@ MainComponent::MainComponent()
     followPlayheadButton.setToggleState(true, juce::dontSendNotification);
     waveform.setFollowPlayhead(true);
 
+    // These buttons would otherwise grab keyboard focus and treat the space
+    // bar as "click me" (JUCE's default Button behaviour) instead of it
+    // reaching MainComponent::keyPressed as a play/pause toggle.
+    openButton.setWantsKeyboardFocus(false);
+    playButton.setWantsKeyboardFocus(false);
+    stopButton.setWantsKeyboardFocus(false);
+    rewindButton.setWantsKeyboardFocus(false);
+    followPlayheadButton.setWantsKeyboardFocus(false);
+
+    setWantsKeyboardFocus(true);
+
     waveform.onViewRangeChanged = [this]
     {
         scrollbar.setRange(waveform.getTotalLength(), waveform.getViewStart(), waveform.getViewLength());
@@ -49,6 +60,13 @@ MainComponent::MainComponent()
 
     setSize(1000, 600);
     startTimerHz(30);
+
+    // Deferred rather than called directly: at this point in the
+    // constructor MainComponent hasn't been parented into the DocumentWindow
+    // yet (Main.cpp's setContentOwned() does that right after constructing
+    // this), so grabbing focus now would silently fail. By the time the
+    // message loop gets to this callback, it has been.
+    juce::MessageManager::callAsync([this] { grabKeyboardFocus(); });
 }
 
 MainComponent::~MainComponent()
@@ -108,6 +126,28 @@ void MainComponent::filesDropped(const juce::StringArray& files, int, int)
 {
     if (files.size() > 0)
         loadFile(juce::File(files[0]));
+}
+
+bool MainComponent::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::spaceKey)
+    {
+        togglePlayPause();
+        return true;
+    }
+
+    return false;
+}
+
+void MainComponent::togglePlayPause()
+{
+    if (!audioEngine.hasFileLoaded())
+        return;
+
+    if (audioEngine.isPlaying())
+        audioEngine.stop();
+    else
+        audioEngine.play();
 }
 
 void MainComponent::openFileChooser()

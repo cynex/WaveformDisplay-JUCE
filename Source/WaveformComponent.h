@@ -24,7 +24,17 @@
     (min/max/energy) down into the available texels, same as before.
 
     Mouse wheel  -> zoom (centred on the cursor position)
-    Click + drag -> pan
+    Click + drag -> turntable-style scratches the audio if playback is
+                    already running when the click lands (AudioEngine's
+                    ScratchSource continuously chases a target position that
+                    moves RELATIVE to mouse movement, inverted - dragging
+                    right moves it backwards, like pulling a record towards
+                    you - rather than jumping to an absolute cursor
+                    position), otherwise pans the view. Decided once per
+                    gesture at mouseDown so starting/stopping playback
+                    mid-drag can't change its meaning underneath the user.
+                    A plain click while paused (no drag) seeks once, on
+                    release.
 
     Texture rebuilds run on a dedicated background thread (see run() /
     buildTextureData()) rather than inline in renderOpenGL(): the GL thread
@@ -359,6 +369,8 @@ private:
     double dragStartViewStart = 0.0;
     juce::Point<float> dragStartMouse;
     bool draggedPastClickThreshold = false;
+    bool scrubbingThisDrag = false;
+    double scratchTargetSeconds = 0.0; // running target while scratchingThisDrag, updated relatively each mouseDrag
 
     mutable juce::CriticalSection dataLock;
 

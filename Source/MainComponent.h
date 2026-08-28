@@ -20,10 +20,13 @@ public:
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
+    bool keyPressed(const juce::KeyPress& key) override;
+
     void loadFile(const juce::File& file);
 
 private:
     void openFileChooser();
+    void togglePlayPause();
     void timerCallback() override;
 
     AudioEngine audioEngine;

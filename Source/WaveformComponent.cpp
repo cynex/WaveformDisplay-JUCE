@@ -465,6 +465,21 @@ void WaveformComponent::mouseDown(const juce::MouseEvent& e)
     dragStartViewStart = viewStart;
     dragStartMouse = e.position;
     draggedPastClickThreshold = false;
+
+    // Whether this whole gesture scratches (turntable-style: the audio
+    // engine chases a continuously-updated target position, so playback
+    // speed/direction/pitch follow the mouse) or pans is decided once,
+    // here, from playback state at the moment the click lands - not
+    // re-evaluated every mouseDrag - so starting or stopping playback
+    // mid-drag can't switch a gesture's meaning out from under the user
+    // partway through it.
+    scrubbingThisDrag = audioEngine.hasFileLoaded() && audioEngine.isPlaying();
+
+    if (scrubbingThisDrag)
+    {
+        audioEngine.beginScratch();
+        scratchTargetSeconds = audioEngine.getPosition();
+    }
 }
 
 void WaveformComponent::mouseDrag(const juce::MouseEvent& e)
@@ -472,6 +487,37 @@ void WaveformComponent::mouseDrag(const juce::MouseEvent& e)
     const double total = getTotalLength();
     if (total <= 0.0 || getWidth() <= 0)
         return;
+
+    if (scrubbingThisDrag)
+    {
+        // Relative, not absolute: the target moves by however far the
+        // cursor moved since the LAST event, converted to samples at the
+        // current zoom level, rather than jumping straight to wherever the
+        // cursor now sits on the waveform. Inverted (dragging right moves
+        // the target BACKWARDS) to match a turntable, where pulling the
+        // record towards you (which reads as a leftward drag once you're
+        // looking at time increasing to the right) is what scratches it
+        // backwards. The actual audible speed/smoothness of the scratch
+        // comes from ScratchSource's own follow filter continuously chasing
+        // this target - see its comment - not from anything done here.
+        const double samplesPerPixel = viewLength / (double) getWidth();
+        const float dxPixels = e.position.x - dragStartMouse.x;
+        dragStartMouse = e.position;
+
+        const double sampleRate = audioEngine.getSampleRate();
+        if (sampleRate > 0.0)
+        {
+            scratchTargetSeconds -= (dxPixels * samplesPerPixel) / sampleRate;
+            scratchTargetSeconds = juce::jlimit(0.0, total / sampleRate, scratchTargetSeconds);
+            audioEngine.setScratchTargetSeconds(scratchTargetSeconds);
+        }
+
+        // Follow-playhead (if enabled) recentres the view on the new
+        // playback position every render frame on its own - see
+        // renderOpenGL - so scratching doesn't need to touch the view here
+        // itself, just keep moving the target position.
+        return;
+    }
 
     const float dx = e.position.x - dragStartMouse.x;
 
@@ -494,6 +540,14 @@ void WaveformComponent::mouseDrag(const juce::MouseEvent& e)
 
 void WaveformComponent::mouseUp(const juce::MouseEvent& e)
 {
+    // Hand playback back to the transport, resuming from wherever
+    // scratching left the position.
+    if (scrubbingThisDrag)
+    {
+        audioEngine.endScratch();
+        return;
+    }
+
     // A genuine click (not a pan) seeks the playhead to wherever the cursor
     // landed - deferred to mouseUp rather than mouseDown so a click-drag pan
     // never has its start point misread as a seek (see mouseDrag).
@@ -856,13 +910,48 @@ void WaveformComponent::renderOpenGL()
     // line is drawn at, every single frame.
     const double sampleRate = audioEngine.getSampleRate();
     const bool isPlayingNow = audioEngine.isPlaying();
-    const double smoothedSeconds = playheadLineTracker.update(audioEngine.getPosition(), isPlayingNow);
+
+    // SmoothPositionTracker's whole job is extrapolating a STEADY 1x forward
+    // clock between infrequent updates - exactly wrong while scratching,
+    // where the real motion is whatever speed/direction the mouse is
+    // driving (including reverse), so its constant-forward-motion guess
+    // would fight the actual movement and read as lag/rubber-banding.
+    // AudioEngine::getPosition() already returns the scratch engine's own
+    // continuously-updated position directly in that case, so it's used
+    // as-is instead.
+    const bool isScratchingNow = audioEngine.isScratching();
+    const double smoothedSeconds = isScratchingNow
+        ? audioEngine.getPosition()
+        : playheadLineTracker.update(audioEngine.getPosition(), isPlayingNow);
     const double playheadSample = sampleRate > 0.0 ? smoothedSeconds * sampleRate : 0.0;
 
     if (followPlayhead && isPlayingNow && sampleRate > 0.0)
     {
         const juce::ScopedLock sl(dataLock);
-        viewStart = playheadSample - viewLength * 0.5;
+        double newViewStart = playheadSample - viewLength * 0.5;
+
+        // Snap to whole DEVICE-PIXEL steps in sample-space. Without this,
+        // viewStart drifts by a continuous, sub-pixel amount every frame
+        // (it's derived from playheadSample, which itself moves
+        // continuously via SmoothPositionTracker) - so the sub-pixel PHASE
+        // between the fixed block/texel grid and the screen's pixel grid is
+        // never the same two frames in a row. Each pixel's block-boundary
+        // blend (and the 2x horizontal supersample) is already correctly
+        // anti-aliased for whatever that phase happens to be at any single
+        // instant, but a continuously drifting phase makes each pixel's
+        // blend weight oscillate over time even while the underlying audio
+        // content on screen has barely changed - which is exactly a moire/
+        // shimmer pattern, not a per-frame aliasing problem AA can fix.
+        // Quantizing viewStart to whole pixels holds that phase fixed
+        // between two consecutive whole-pixel steps, so it stops drifting;
+        // motion still reads as smooth since a single device pixel is well
+        // below the threshold of visible "stepping".
+        const double devicePixelWidth = juce::jmax(1, getWidth()) * openGLContext.getRenderingScale();
+        const double samplesPerDevicePixel = viewLength / juce::jmax(1.0, devicePixelWidth);
+        if (samplesPerDevicePixel > 0.0)
+            newViewStart = std::round(newViewStart / samplesPerDevicePixel) * samplesPerDevicePixel;
+
+        viewStart = newViewStart;
         clampView();
     }
 
