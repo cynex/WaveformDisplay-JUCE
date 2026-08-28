@@ -26,7 +26,10 @@ bool AudioEngine::loadFile(const juce::File& file)
     sourceSampleRate = reader->sampleRate;
     totalNumSamples = reader->lengthInSamples;
 
-    analyse(*reader);
+    MipPyramid newPyramid;
+    analyse(*reader, newPyramid);
+    std::atomic_store(&mipLevelsPtr, std::make_shared<const MipPyramid>(std::move(newPyramid)));
+    loadGeneration.fetch_add(1, std::memory_order_relaxed);
 
     auto newSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
     transportSource.setSource(newSource.get(), 0, nullptr, sourceSampleRate);
@@ -35,15 +38,14 @@ bool AudioEngine::loadFile(const juce::File& file)
     return true;
 }
 
-void AudioEngine::analyse(juce::AudioFormatReader& reader)
+void AudioEngine::analyse(juce::AudioFormatReader& reader, MipPyramid& outPyramid)
 {
-    mipLevels.clear();
     std::vector<WaveformBlock> blocks;
 
     const juce::int64 numSamples = reader.lengthInSamples;
     if (numSamples <= 0)
     {
-        mipLevels.push_back({});
+        outPyramid.push_back({});
         return;
     }
 
@@ -158,11 +160,11 @@ void AudioEngine::analyse(juce::AudioFormatReader& reader)
         }
     }
 
-    mipLevels.push_back(std::move(blocks));
-    buildMipLevels();
+    outPyramid.push_back(std::move(blocks));
+    buildMipLevels(outPyramid);
 }
 
-void AudioEngine::buildMipLevels()
+void AudioEngine::buildMipLevels(MipPyramid& pyramid)
 {
     // Keep halving until the level is small enough to always fit inside a
     // texture, however far the user zooms out. Bucket boundaries at every
@@ -172,9 +174,9 @@ void AudioEngine::buildMipLevels()
     // or zooms by fractional amounts.
     constexpr size_t smallestLevelSize = 1024;
 
-    while (mipLevels.back().size() > smallestLevelSize)
+    while (pyramid.back().size() > smallestLevelSize)
     {
-        const auto& prev = mipLevels.back();
+        const auto& prev = pyramid.back();
         std::vector<WaveformBlock> next((prev.size() + 1) / 2);
 
         for (size_t i = 0; i < next.size(); ++i)
@@ -192,7 +194,7 @@ void AudioEngine::buildMipLevels()
             next[i] = wb;
         }
 
-        mipLevels.push_back(std::move(next));
+        pyramid.push_back(std::move(next));
     }
 }
 

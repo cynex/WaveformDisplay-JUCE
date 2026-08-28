@@ -107,9 +107,22 @@ namespace
             return 1.0 - smoothstep(-feather, feather, dist);
         }
 
-        void main()
+        // Everything x-position-dependent up through the waveform's own
+        // colour (i.e. excluding the centre line and playhead, which have
+        // their own dedicated 1px AA and are drawn once, not supersampled -
+        // see main()). Factored out so main() can call it twice at
+        // sub-pixel-offset x positions and average the results for 2x
+        // horizontal supersampling: each screen pixel's block-boundary
+        // blend, coverage, and frequency tint are all functions of x that
+        // can vary with high spatial frequency (a fast zoom-out packs many
+        // blocks per pixel), and evaluating them only once at the pixel
+        // centre can alias/shimmer as that sub-pixel sample point drifts
+        // frame to frame - most visible as the SAME kind of edge flicker
+        // the block-boundary blend above already fixes for panning, just
+        // reintroduced at a finer scale by zooming instead.
+        vec3 sampleWaveform(float xNorm, float y, out float outOfRangeCoverage)
         {
-            float texU = texMapOffset + vUv.x * texMapScale;
+            float texU = texMapOffset + xNorm * texMapScale;
 
             // Texel-centre convention: texel i's centre sits at (i+0.5)/texWidth,
             // so this recovers a continuous texel index whose fractional part
@@ -118,6 +131,25 @@ namespace
             float idx0 = floor(texIndexF);
             float frac = texIndexF - idx0;
             float idx1 = idx0 + 1.0;
+
+            // How far (in texels) idx0/idx1 fall outside the texture's
+            // actual [0, texWidth) coverage, BEFORE clamping them into
+            // range below. Non-zero here means this fragment's mapped
+            // position isn't really backed by the currently-uploaded
+            // texture at all - most commonly because the view has moved
+            // (panning, zooming, or scrolling during playback) faster than
+            // the background rebuild thread has kept up, so the texture
+            // still on screen was built for a narrower/offset window than
+            // the current view. Clamping idx0/idx1 alone would just repeat
+            // whichever real block sits at the texture's edge across that
+            // whole region, which reads as a solid pixelated/stretched
+            // smear - outOfRangeCoverage below fades that region to the
+            // background colour instead, which reads as "not loaded yet"
+            // rather than as wrong waveform content.
+            outOfRangeCoverage = max(
+                smoothstep(0.0, 1.0, -texIndexF),
+                smoothstep(0.0, 1.0, texIndexF - (texWidth - 1.0)));
+
             idx0 = clamp(idx0, 0.0, texWidth - 1.0);
             idx1 = clamp(idx1, 0.0, texWidth - 1.0);
 
@@ -125,9 +157,6 @@ namespace
             vec4 texel1 = texture2D(waveformTex, vec2((idx1 + 0.5) / texWidth, 0.5));
             float midE0 = texture2D(midTex, vec2((idx0 + 0.5) / texWidth, 0.5)).r;
             float midE1 = texture2D(midTex, vec2((idx1 + 0.5) / texWidth, 0.5)).r;
-
-            // Fragment's y position in the same -1..1 amplitude space as the envelope.
-            float y = (vUv.y * 2.0 - 1.0);
 
             // Convert the AA width parameter (pixel-space) into the same
             // normalised amplitude units used above. Smoothing is applied
@@ -179,10 +208,38 @@ namespace
 
             vec3 outColour = mix(backgroundColour, tint, coverage);
 
+            // Fade out-of-range fragments back to the background colour -
+            // see outOfRangeCoverage above.
+            outColour = mix(outColour, backgroundColour, outOfRangeCoverage);
+
+            return outColour;
+        }
+
+        void main()
+        {
+            float y = (vUv.y * 2.0 - 1.0);
+
+            // 2x horizontal supersampling: evaluate the waveform colour at
+            // two sub-pixel-offset x positions (a quarter pixel either side
+            // of centre - the standard 2-tap offset for this kind of
+            // box-filtered supersampling) and average them, rather than a
+            // single sample at the pixel centre. See sampleWaveform's
+            // comment for what this is actually fixing.
+            float pixelToNormX = 1.0 / max(pixelWidth, 1.0);
+            float sampleOffset = pixelToNormX * 0.25;
+
+            float outOfRangeA, outOfRangeB;
+            vec3 colourA = sampleWaveform(vUv.x - sampleOffset, y, outOfRangeA);
+            vec3 colourB = sampleWaveform(vUv.x + sampleOffset, y, outOfRangeB);
+            vec3 outColour = (colourA + colourB) * 0.5;
+
             // Solid white 1px line through the zero-amplitude axis (drawn
             // under the playhead line, and under the waveform - it should
             // read as sitting behind/through the waveform, not painted over
-            // it), opacity controlled by centreLineAlpha.
+            // it), opacity controlled by centreLineAlpha. Drawn once at the
+            // pixel centre, not supersampled - it's a fixed, dead-flat
+            // horizontal band with its own 1px AA already, so there's
+            // nothing horizontally high-frequency about it to alias.
             if (centreLineAlpha > 0.0)
             {
                 float pixelToNormY = 1.0 / max(pixelHeight, 1.0);
@@ -192,13 +249,14 @@ namespace
                 outColour = mix(outColour, vec3(1.0), centreLineCoverage * centreLineAlpha);
             }
 
-            // Playhead: a thin anti-aliased vertical line at the current playback position.
+            // Playhead: a thin anti-aliased vertical line at the current
+            // playback position. Also drawn once at the pixel centre for the
+            // same reason as the centre line - it's independent of aaWidth
+            // and already gets its own crisp 1px AA below, deliberately so
+            // it always reads as a sharp line regardless of how soft the
+            // waveform's own edges are set to.
             if (playheadVisible > 0.5)
             {
-                // Deliberately independent of aaWidth - the playhead should
-                // always read as a crisp 1px line regardless of how soft the
-                // waveform's own edges are set to.
-                float pixelToNormX = 1.0 / max(pixelWidth, 1.0);
                 float lineHalfWidth = 1.0 * pixelToNormX;
                 float dx = abs(vUv.x - playheadViewFrac);
                 float lineCoverage = 1.0 - smoothstep(lineHalfWidth * 0.5, lineHalfWidth * 1.5, dx);
@@ -210,7 +268,8 @@ namespace
     )";
 }
 
-WaveformComponent::WaveformComponent(AudioEngine& engine) : audioEngine(engine)
+WaveformComponent::WaveformComponent(AudioEngine& engine)
+    : juce::Thread("WaveformTextureBuilder"), audioEngine(engine)
 {
     openGLContext.setRenderer(this);
     openGLContext.attachTo(*this);
@@ -232,11 +291,93 @@ WaveformComponent::WaveformComponent(AudioEngine& engine) : audioEngine(engine)
     // recentres the view during follow-playhead, which has to happen on the
     // message thread (setViewRange touches the scrollbar Component).
     startTimerHz(60);
+
+    startThread();
 }
 
 WaveformComponent::~WaveformComponent()
 {
+    // Wake the worker (it normally blocks indefinitely on buildRequestEvent,
+    // which stopThread()'s own exit signal doesn't touch) so it notices
+    // threadShouldExit() and unwinds before anything it might still be
+    // reading (audioEngine, the tile cache) goes away.
+    signalThreadShouldExit();
+    buildRequestEvent.signal();
+    stopThread(2000);
+
     openGLContext.detach();
+}
+
+void WaveformComponent::notifyFileChanged()
+{
+    // The tile cache is owned solely by the background build thread now
+    // (see its class comment) - it notices a new file itself, via
+    // AudioEngine::getLoadGeneration(), the next time it runs a build,
+    // rather than being cleared from here across threads. This just makes
+    // sure a build actually gets requested.
+    textureDirty = true;
+}
+
+void WaveformComponent::clearTileCache()
+{
+    tileCache.clear();
+    tileLru.clear();
+    tileLruPos.clear();
+}
+
+const WaveformComponent::TileData& WaveformComponent::getOrBuildTile(int level, int tileIndex, const std::vector<WaveformBlock>& levelBlocks)
+{
+    const auto key = tileKey(level, tileIndex);
+
+    auto found = tileCache.find(key);
+    if (found != tileCache.end())
+    {
+        // Touch: move this key to the front of the LRU list so it's the
+        // last thing evicted.
+        tileLru.splice(tileLru.begin(), tileLru, tileLruPos[key]);
+        return found->second;
+    }
+
+    const int blockStart = tileIndex * kTileBlocks;
+    const int blockEnd = juce::jmin(blockStart + kTileBlocks, (int) levelBlocks.size());
+    const int numBlocks = juce::jmax(0, blockEnd - blockStart);
+
+    auto toByte = [](float v01) -> juce::uint8
+    {
+        return (juce::uint8) juce::jlimit(0, 255, (int) std::lround(v01 * 255.0f));
+    };
+
+    TileData tile;
+    tile.numBlocks = numBlocks;
+    tile.waveform.resize((size_t) numBlocks * 4);
+    tile.mid.resize((size_t) numBlocks * 4);
+
+    for (int i = 0; i < numBlocks; ++i)
+    {
+        const auto& b = levelBlocks[(size_t) (blockStart + i)];
+        tile.waveform[(size_t) i * 4 + 0] = toByte(b.minValue * 0.5f + 0.5f);
+        tile.waveform[(size_t) i * 4 + 1] = toByte(b.maxValue * 0.5f + 0.5f);
+        tile.waveform[(size_t) i * 4 + 2] = toByte(b.lowEnergy);
+        tile.waveform[(size_t) i * 4 + 3] = toByte(b.highEnergy);
+
+        tile.mid[(size_t) i * 4 + 0] = toByte(b.midEnergy);
+        tile.mid[(size_t) i * 4 + 1] = 0;
+        tile.mid[(size_t) i * 4 + 2] = 0;
+        tile.mid[(size_t) i * 4 + 3] = 255;
+    }
+
+    if (tileCache.size() >= kMaxCachedTiles && !tileLru.empty())
+    {
+        const auto evictKey = tileLru.back();
+        tileLru.pop_back();
+        tileLruPos.erase(evictKey);
+        tileCache.erase(evictKey);
+    }
+
+    tileLru.push_front(key);
+    tileLruPos[key] = tileLru.begin();
+    auto inserted = tileCache.emplace(key, std::move(tile));
+    return inserted.first->second;
 }
 
 void WaveformComponent::setParameters(const WaveformParameters& newParams)
@@ -377,12 +518,20 @@ void WaveformComponent::newOpenGLContextCreated()
 {
     buildShaders();
 
+    // A texture width equal to the raw (finest) analysis block count (which
+    // can be 100,000+ for a full song) silently exceeds GL_MAX_TEXTURE_SIZE
+    // on every GPU (usually 8192-16384) - glTexImage2D then fails and the
+    // texture is left uninitialised. Only queryable with a current GL
+    // context, so it's read once here (GL thread) and cached for the
+    // background build thread (which has no GL context) to read.
+    GLint maxTexSize = 4096;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize);
+    safeMaxTextureWidth = juce::jmin((int) maxTexSize, 8192);
+
     glGenBuffers(1, &vertexBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
 
-    glGenTextures(1, &waveformTexture);
-    glBindTexture(GL_TEXTURE_2D, waveformTexture);
     // NOTE: deliberately GL_RGBA/GL_UNSIGNED_BYTE, not a float format. A
     // GL_RGBA32F texture is not a valid/complete combination under the
     // GLES2-style context JUCE gives us here (attribute/varying/gl_FragColor
@@ -402,21 +551,31 @@ void WaveformComponent::newOpenGLContextCreated()
     // block is rendered as a sharp-edged bar instead; visual softness comes
     // from the SDF's own aaWidth/smoothing params (which anti-alias the
     // bar's EDGES, not its height) rather than from texture filtering.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    //
+    // Two slots each, for double buffering - see the member comment on
+    // waveformTextures.
+    glGenTextures(2, waveformTextures);
+    glGenTextures(2, midTextures);
+    for (int slot = 0; slot < 2; ++slot)
+    {
+        glBindTexture(GL_TEXTURE_2D, waveformTextures[slot]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // Second texture for mid-band energy - waveformTexture's RGBA8 channels
-    // were already fully spoken for (min/max/lowEnergy/highEnergy).
-    glGenTextures(1, &midTexture);
-    glBindTexture(GL_TEXTURE_2D, midTexture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Second texture for mid-band energy - waveformTextures' RGBA8
+        // channels were already fully spoken for (min/max/lowEnergy/highEnergy).
+        glBindTexture(GL_TEXTURE_2D, midTextures[slot]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    allocatedTextureWidth = -1;
+        allocatedTextureWidths[slot] = -1;
+    }
+
+    activeTextureSlot = 0;
     textureDirty = true;
 }
 
@@ -437,27 +596,68 @@ void WaveformComponent::buildShaders()
     }
 }
 
-void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double viewLengthSamples)
+void WaveformComponent::run()
 {
-    // A texture width equal to the raw (finest) analysis block count (which
-    // can be 100,000+ for a full song) silently exceeds GL_MAX_TEXTURE_SIZE
-    // on every GPU (usually 8192-16384) - glTexImage2D then fails and the
-    // texture is left uninitialised.
-    GLint maxTexSize = 4096;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexSize);
-    const int safeMaxWidth = juce::jmin((int) maxTexSize, 8192);
+    // Blocks here until the GL thread has a rebuild for us (or wants us to
+    // exit) - see the class comment and the member comments on
+    // buildRequestEvent/pendingRequest/readyResult for the overall design.
+    while (!threadShouldExit())
+    {
+        buildRequestEvent.wait(-1);
+        if (threadShouldExit())
+            break;
 
-    // Target roughly one texel per screen pixel. This isn't just an
-    // optimisation: the fragment shader does a single texture lookup per
-    // pixel with no further reduction, so every texel must already be the
-    // EXHAUSTIVE min/max/energy over whatever it covers (see the mip-level
-    // choice below) - otherwise pixels could still skip peaks and flicker
-    // as the view moves by sub-pixel amounts.
-    const int pixelWidth = juce::jmax(1, (int) std::ceil((double) getWidth() * openGLContext.getRenderingScale()));
-    const int targetWidth = juce::jmin(pixelWidth, safeMaxWidth);
+        BuildRequest request;
+        {
+            const juce::ScopedLock sl(requestLock);
+            if (!hasPendingRequest)
+                continue; // spurious wake, or already consumed - nothing to do
+            request = pendingRequest;
+            hasPendingRequest = false;
+        }
+
+        // A new file means block index N at any given level no longer means
+        // the same audio it meant a moment ago, so every cached tile is now
+        // stale - detected here (rather than the message thread reaching
+        // across to clear the cache itself) because the cache is otherwise
+        // exclusively this thread's.
+        const int loadGen = audioEngine.getLoadGeneration();
+        if (loadGen != workerCachedLoadGeneration)
+        {
+            clearTileCache();
+            workerCachedLoadGeneration = loadGen;
+        }
+
+        BuildResult result = buildTextureData(request);
+        if (result.textureWidth <= 0)
+            continue;
+
+        {
+            const juce::ScopedLock sl(resultLock);
+            readyResult = std::move(result);
+            hasReadyResult = true;
+        }
+
+        // Wake the GL thread so the finished texture gets uploaded and shown
+        // promptly rather than waiting for its next incidental repaint.
+        openGLContext.triggerRepaint();
+    }
+}
+
+WaveformComponent::BuildResult WaveformComponent::buildTextureData(const BuildRequest& request)
+{
+    BuildResult result;
+    result.generation = request.generation;
+
+    // A shared_ptr snapshot, not a reference - so a file reload on the
+    // message thread publishing a new pyramid mid-build can't pull this
+    // one out from under us; see AudioEngine::getMipPyramid().
+    auto pyramid = audioEngine.getMipPyramid();
+    if (pyramid == nullptr || pyramid->empty())
+        return result;
 
     const double baseSamplesPerBlock = juce::jmax(1, audioEngine.getNumSamplesPerBlock());
-    const int numLevels = audioEngine.getNumMipLevels();
+    const int numLevels = (int) pyramid->size();
 
     // Pick the finest mip level whose fixed buckets still fit the visible
     // range inside the target texture width. Using the pyramid's fixed,
@@ -470,15 +670,15 @@ void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double vi
     while (level + 1 < numLevels)
     {
         const double levelSamplesPerBlock = baseSamplesPerBlock * (double) (1 << level);
-        const double blocksInViewAtLevel = viewLengthSamples / levelSamplesPerBlock;
-        if (blocksInViewAtLevel <= (double) targetWidth)
+        const double blocksInViewAtLevel = request.viewLength / levelSamplesPerBlock;
+        if (blocksInViewAtLevel <= (double) request.targetWidth)
             break;
         ++level;
     }
 
-    const auto& levelBlocks = audioEngine.getMipLevel(level);
+    const auto& levelBlocks = (*pyramid)[(size_t) level];
     if (levelBlocks.empty())
-        return;
+        return result;
 
     const double levelSamplesPerBlock = baseSamplesPerBlock * (double) (1 << level);
     const int numLevelBlocks = (int) levelBlocks.size();
@@ -493,13 +693,13 @@ void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double vi
     // upload) almost every time - an occasional reallocation stall landing
     // on the wrong frame is a very plausible source of the last bit of
     // "minor" flicker, distinct from anything already fixed above.
-    int firstBlock = (int) std::floor(viewStartSamples / levelSamplesPerBlock);
-    int windowBlocks = juce::jmin(targetWidth, numLevelBlocks);
+    int firstBlock = (int) std::floor(request.viewStart / levelSamplesPerBlock);
+    int windowBlocks = juce::jmin(request.targetWidth, numLevelBlocks);
     firstBlock = juce::jlimit(0, numLevelBlocks - windowBlocks, firstBlock);
     int lastBlockExclusive = firstBlock + windowBlocks;
 
     const int numVisibleBlocks = lastBlockExclusive - firstBlock;
-    textureWidth = juce::jmin(numVisibleBlocks, safeMaxWidth);
+    const int textureWidthLocal = juce::jmin(numVisibleBlocks, request.safeMaxWidth);
 
     auto toByte = [](float v01) -> juce::uint8
     {
@@ -512,60 +712,77 @@ void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double vi
     // done over fixed level-block indices, and every texel still covers its
     // whole span exhaustively, so it stays just as stable and just as safe
     // for the shader's single-sample lookup.
-    const double blocksPerTexel = (double) numVisibleBlocks / (double) textureWidth;
+    const double blocksPerTexel = (double) numVisibleBlocks / (double) textureWidthLocal;
 
-    std::vector<juce::uint8> pixels((size_t) textureWidth * 4);
-    std::vector<juce::uint8> midPixels((size_t) textureWidth * 4);
+    std::vector<juce::uint8> pixels((size_t) textureWidthLocal * 4);
+    std::vector<juce::uint8> midPixels((size_t) textureWidthLocal * 4);
 
-    for (int t = 0; t < textureWidth; ++t)
+    if (blocksPerTexel <= 1.0)
     {
-        int i0 = firstBlock + (int) (t * blocksPerTexel);
-        int i1 = firstBlock + juce::jmax((int) ((t + 1) * blocksPerTexel), (int) (t * blocksPerTexel) + 1);
-        i0 = juce::jlimit(firstBlock, lastBlockExclusive - 1, i0);
-        i1 = juce::jlimit(i0 + 1, lastBlockExclusive, i1);
-
-        float minV = 1.0f, maxV = -1.0f, lowE = 0.0f, midE = 0.0f, highE = 0.0f;
-        for (int i = i0; i < i1; ++i)
+        // The common case (one texel per block): every texel's bytes come
+        // straight from a cached tile - built once per (level, tile) the
+        // first time it's needed, then just memcpy'd out on every later
+        // rebuild that revisits it (panning back, zooming back out then in
+        // near the same spot, etc.) instead of re-walking blocks and
+        // re-quantising floats to bytes every single time.
+        int t = 0;
+        while (t < textureWidthLocal)
         {
-            const auto& b = levelBlocks[(size_t) i];
-            minV = juce::jmin(minV, b.minValue);
-            maxV = juce::jmax(maxV, b.maxValue);
-            lowE = juce::jmax(lowE, b.lowEnergy);
-            midE = juce::jmax(midE, b.midEnergy);
-            highE = juce::jmax(highE, b.highEnergy);
+            const int blockIndex = firstBlock + t;
+            const int tileIndex = blockIndex / kTileBlocks;
+            const int tileLocalStart = blockIndex - tileIndex * kTileBlocks;
+            const auto& tile = getOrBuildTile(level, tileIndex, levelBlocks);
+
+            const int blocksLeftInTile = tile.numBlocks - tileLocalStart;
+            const int blocksLeftInWindow = textureWidthLocal - t;
+            const int n = juce::jmax(0, juce::jmin(blocksLeftInTile, blocksLeftInWindow));
+            if (n <= 0)
+                break; // shouldn't happen, but avoid an infinite loop if it does
+
+            std::memcpy(pixels.data() + (size_t) t * 4, tile.waveform.data() + (size_t) tileLocalStart * 4, (size_t) n * 4);
+            std::memcpy(midPixels.data() + (size_t) t * 4, tile.mid.data() + (size_t) tileLocalStart * 4, (size_t) n * 4);
+
+            t += n;
         }
-
-        // min/max are -1..1, packed into 0..1 for 8-bit storage; unpacked back
-        // to -1..1 in the shader. Energies are already 0..1.
-        pixels[(size_t) t * 4 + 0] = toByte(minV * 0.5f + 0.5f);
-        pixels[(size_t) t * 4 + 1] = toByte(maxV * 0.5f + 0.5f);
-        pixels[(size_t) t * 4 + 2] = toByte(lowE);
-        pixels[(size_t) t * 4 + 3] = toByte(highE);
-
-        midPixels[(size_t) t * 4 + 0] = toByte(midE);
-        midPixels[(size_t) t * 4 + 1] = 0;
-        midPixels[(size_t) t * 4 + 2] = 0;
-        midPixels[(size_t) t * 4 + 3] = 255;
     }
-
-    // With the window above now fixed to targetWidth blocks (rather than
-    // wobbling +/-1 with the exact view bounds), textureWidth stays constant
-    // across rebuilds almost all the time - so reuse the existing GPU
-    // storage with a data-only update (glTexSubImage2D) instead of asking
-    // the driver to reallocate it (glTexImage2D) on every single rebuild.
-    glBindTexture(GL_TEXTURE_2D, waveformTexture);
-    if (textureWidth == allocatedTextureWidth)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
     else
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    {
+        // Rare fallback: even the coarsest mip level has more blocks in view
+        // than the texture can hold, so several blocks must be reduced into
+        // one texel. Not tile-cached (the grouping boundaries here depend on
+        // the exact view, unlike the fixed tile grid) - this path is only
+        // hit at extreme zoom-out on very long files.
+        for (int t = 0; t < textureWidthLocal; ++t)
+        {
+            int i0 = firstBlock + (int) (t * blocksPerTexel);
+            int i1 = firstBlock + juce::jmax((int) ((t + 1) * blocksPerTexel), (int) (t * blocksPerTexel) + 1);
+            i0 = juce::jlimit(firstBlock, lastBlockExclusive - 1, i0);
+            i1 = juce::jlimit(i0 + 1, lastBlockExclusive, i1);
 
-    glBindTexture(GL_TEXTURE_2D, midTexture);
-    if (textureWidth == allocatedTextureWidth)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, midPixels.data());
-    else
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, midPixels.data());
+            float minV = 1.0f, maxV = -1.0f, lowE = 0.0f, midE = 0.0f, highE = 0.0f;
+            for (int i = i0; i < i1; ++i)
+            {
+                const auto& b = levelBlocks[(size_t) i];
+                minV = juce::jmin(minV, b.minValue);
+                maxV = juce::jmax(maxV, b.maxValue);
+                lowE = juce::jmax(lowE, b.lowEnergy);
+                midE = juce::jmax(midE, b.midEnergy);
+                highE = juce::jmax(highE, b.highEnergy);
+            }
 
-    allocatedTextureWidth = textureWidth;
+            // min/max are -1..1, packed into 0..1 for 8-bit storage; unpacked back
+            // to -1..1 in the shader. Energies are already 0..1.
+            pixels[(size_t) t * 4 + 0] = toByte(minV * 0.5f + 0.5f);
+            pixels[(size_t) t * 4 + 1] = toByte(maxV * 0.5f + 0.5f);
+            pixels[(size_t) t * 4 + 2] = toByte(lowE);
+            pixels[(size_t) t * 4 + 3] = toByte(highE);
+
+            midPixels[(size_t) t * 4 + 0] = toByte(midE);
+            midPixels[(size_t) t * 4 + 1] = 0;
+            midPixels[(size_t) t * 4 + 2] = 0;
+            midPixels[(size_t) t * 4 + 3] = 255;
+        }
+    }
 
     // The texture's bucket boundaries are snapped to whole fixed blocks
     // (floor/ceil above), so the sample range it actually covers is very
@@ -575,9 +792,45 @@ void WaveformComponent::uploadWaveformTexture(double viewStartSamples, double vi
     // match; without this, that rounding offset changes as viewStart moves
     // continuously past each block boundary during a drag, which reads as
     // the waveform content subtly snapping/judder while panning.
-    textureViewStart = firstBlock * levelSamplesPerBlock;
-    textureViewLength = (double) numVisibleBlocks * levelSamplesPerBlock;
-    textureDirty = false;
+    result.textureWidth = textureWidthLocal;
+    result.pixels = std::move(pixels);
+    result.midPixels = std::move(midPixels);
+    result.textureViewStart = firstBlock * levelSamplesPerBlock;
+    result.textureViewLength = (double) numVisibleBlocks * levelSamplesPerBlock;
+    return result;
+}
+
+void WaveformComponent::applyBuildResult(BuildResult& result)
+{
+    // Written into the INACTIVE slot - the one not currently bound for
+    // sampling by this frame's (about-to-happen) draw call - and only
+    // flipped to active once the upload is done. See the member comment on
+    // waveformTextures for why.
+    const int backSlot = 1 - activeTextureSlot;
+
+    // With the window fixed to targetWidth blocks (rather than wobbling
+    // +/-1 with the exact view bounds), the width stays constant across
+    // rebuilds almost all the time - so reuse the existing GPU storage with
+    // a data-only update (glTexSubImage2D) instead of asking the driver to
+    // reallocate it (glTexImage2D) on every single rebuild.
+    glBindTexture(GL_TEXTURE_2D, waveformTextures[backSlot]);
+    if (result.textureWidth == allocatedTextureWidths[backSlot])
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, result.textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, result.pixels.data());
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, result.textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, result.pixels.data());
+
+    glBindTexture(GL_TEXTURE_2D, midTextures[backSlot]);
+    if (result.textureWidth == allocatedTextureWidths[backSlot])
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, result.textureWidth, 1, GL_RGBA, GL_UNSIGNED_BYTE, result.midPixels.data());
+    else
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, result.textureWidth, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, result.midPixels.data());
+
+    allocatedTextureWidths[backSlot] = result.textureWidth;
+    activeTextureSlot = backSlot;
+
+    textureWidth = result.textureWidth;
+    textureViewStart = result.textureViewStart;
+    textureViewLength = result.textureViewLength;
 }
 
 void WaveformComponent::renderOpenGL()
@@ -627,8 +880,8 @@ void WaveformComponent::renderOpenGL()
     }
 
     // The texture window covers many more blocks than one frame's view
-    // strictly needs (see uploadWaveformTexture), so most of the time the
-    // new view is still fully covered by whatever's already uploaded - only
+    // strictly needs (see buildTextureData), so most of the time the new
+    // view is still fully covered by whatever's already uploaded - only
     // rebuild once it's about to slide outside that. Following now moves
     // the view every render frame (up to display refresh rate) rather than
     // a fixed 60Hz, so unconditionally rebuilding here would mean a full
@@ -641,7 +894,54 @@ void WaveformComponent::renderOpenGL()
         textureDirty = true;
 
     if (textureDirty)
-        uploadWaveformTexture(localViewStart, localViewLength);
+    {
+        // Hand the rebuild off to the background thread instead of doing the
+        // CPU packing inline here - this frame keeps drawing with whatever
+        // texture is already active while the worker catches up, rather
+        // than stalling however long the packing takes. See the class
+        // comment for the resulting lag-instead-of-stutter tradeoff.
+        const int pixelWidth = juce::jmax(1, (int) std::ceil((double) getWidth() * openGLContext.getRenderingScale()));
+        const int safeMaxWidth = safeMaxTextureWidth.load();
+        const int paddedWidth = (int) std::ceil((double) pixelWidth * kTextureWindowPadding);
+
+        BuildRequest request;
+        request.viewStart = localViewStart;
+        request.viewLength = localViewLength;
+        request.targetWidth = juce::jmin(paddedWidth, safeMaxWidth);
+        request.safeMaxWidth = safeMaxWidth;
+        request.generation = nextGeneration.fetch_add(1, std::memory_order_relaxed);
+
+        {
+            const juce::ScopedLock sl(requestLock);
+            pendingRequest = request;
+            hasPendingRequest = true;
+        }
+        buildRequestEvent.signal();
+
+        textureDirty = false; // the just-posted request now owns getting this rebuilt
+    }
+
+    // Pick up the latest finished build, if any, and upload it - the only
+    // part of a rebuild that has to run on the GL thread.
+    {
+        BuildResult completed;
+        bool haveCompleted = false;
+        {
+            const juce::ScopedLock sl(resultLock);
+            if (hasReadyResult && readyResult.generation != displayedGeneration)
+            {
+                completed = std::move(readyResult);
+                haveCompleted = true;
+                hasReadyResult = false;
+            }
+        }
+
+        if (haveCompleted)
+        {
+            applyBuildResult(completed);
+            displayedGeneration = completed.generation;
+        }
+    }
 
     if (shader == nullptr || textureWidth == 0)
         return;
@@ -655,12 +955,14 @@ void WaveformComponent::renderOpenGL()
 
     shader->use();
 
+    // Always sample whichever slot uploadWaveformTexture last flipped to -
+    // never the one it might currently be writing into.
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, waveformTexture);
+    glBindTexture(GL_TEXTURE_2D, waveformTextures[activeTextureSlot]);
     shader->setUniform("waveformTex", 0);
 
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, midTexture);
+    glBindTexture(GL_TEXTURE_2D, midTextures[activeTextureSlot]);
     shader->setUniform("midTex", 1);
 
     shader->setUniform("texWidth", (float) textureWidth);
@@ -723,7 +1025,7 @@ void WaveformComponent::renderOpenGL()
 void WaveformComponent::openGLContextClosing()
 {
     glDeleteBuffers(1, &vertexBuffer);
-    glDeleteTextures(1, &waveformTexture);
-    glDeleteTextures(1, &midTexture);
+    glDeleteTextures(2, waveformTextures);
+    glDeleteTextures(2, midTextures);
     shader.reset();
 }

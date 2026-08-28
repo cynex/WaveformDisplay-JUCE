@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <list>
+#include <unordered_map>
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "WaveformParameters.h"
@@ -23,10 +25,22 @@
 
     Mouse wheel  -> zoom (centred on the cursor position)
     Click + drag -> pan
+
+    Texture rebuilds run on a dedicated background thread (see run() /
+    buildTextureData()) rather than inline in renderOpenGL(): the GL thread
+    just posts what view it needs, keeps drawing with whatever texture is
+    already active, and picks up the finished result (a plain data-only GL
+    upload) whenever it's ready. This trades a small amount of lag - the
+    visible texture can trail the view target by a frame or more under heavy
+    load, still correctly mapped via textureViewStart/textureViewLength, just
+    slightly stale/coarser until the worker catches up - for never stalling
+    a frame outright on the CPU packing work, which is the more noticeable
+    problem (a dropped/late frame) of the two.
 */
 class WaveformComponent : public juce::Component,
                            public juce::OpenGLRenderer,
-                           private juce::Timer
+                           private juce::Timer,
+                           private juce::Thread
 {
 public:
     explicit WaveformComponent(AudioEngine& engine);
@@ -43,7 +57,7 @@ public:
     double getTotalLength() const;
 
     /** Call after loading a new file so the GPU texture is rebuilt from the new analysis data. */
-    void notifyFileChanged() { textureDirty = true; }
+    void notifyFileChanged();
 
     /** When enabled, the view continuously recentres on the playhead during playback. */
     void setFollowPlayhead(bool shouldFollow) { followPlayhead = shouldFollow; }
@@ -75,10 +89,120 @@ public:
 
 private:
     void timerCallback() override;
-    void uploadWaveformTexture(double viewStartSamples, double viewLengthSamples);
     void buildShaders();
     void clampView();
     void seekToScreenX(float screenX);
+
+    // --- Tile cache -----------------------------------------------------
+    // The visible-range texture built each rebuild is assembled from fixed-
+    // size "tiles" of blocks (kTileBlocks blocks wide, at whatever mip level
+    // is chosen) rather than re-packed from scratch every time. Panning back
+    // over a region that's already been visited (extremely common - back
+    // and forth scrubbing, zooming back out then back in near the same
+    // spot) reuses the cached tile's already-packed bytes via a straight
+    // memcpy instead of re-running the packing loop, which is the
+    // "chunk the waveform into image tiles" ask. Tiles are cheap (a handful
+    // of KB each) so an LRU cap of kMaxCachedTiles just bounds memory for
+    // very long scrubbing sessions rather than acting as a real constraint.
+    //
+    // Owned EXCLUSIVELY by the background build thread (run()/
+    // buildTextureData()/getOrBuildTile()) - never touched from the GL or
+    // message thread - so none of it needs its own lock.
+    struct TileData
+    {
+        std::vector<juce::uint8> waveform; // 4 bytes/block: R=min,G=max,B=lowE,A=highE
+        std::vector<juce::uint8> mid;      // 4 bytes/block: R=midE (G/B/A unused)
+        int numBlocks = 0;
+    };
+
+    static constexpr int kTileBlocks = 1024;
+    static constexpr size_t kMaxCachedTiles = 1024;
+
+    static juce::uint64 tileKey(int level, int tileIndex)
+    {
+        return (static_cast<juce::uint64>(static_cast<juce::uint32>(level)) << 32)
+             | static_cast<juce::uint32>(tileIndex);
+    }
+
+    const TileData& getOrBuildTile(int level, int tileIndex, const std::vector<WaveformBlock>& levelBlocks);
+    void clearTileCache();
+
+    std::unordered_map<juce::uint64, TileData> tileCache;
+    std::list<juce::uint64> tileLru;
+    std::unordered_map<juce::uint64, std::list<juce::uint64>::iterator> tileLruPos;
+    // ---------------------------------------------------------------------
+
+    // --- Background texture build thread ---------------------------------
+    // What one rebuild needs to know, and what it produces - see the class
+    // comment for the overall design. Requests are a single-slot mailbox
+    // (a newer post just overwrites the pending one) rather than a queue,
+    // so the worker always works towards the MOST RECENT view target
+    // instead of laboriously catching up through every intermediate one
+    // requested during a fast pan/zoom.
+
+    // Requested texture window is this many times wider (in blocks) than
+    // the screen actually needs, so the active texture keeps covering the
+    // view for longer while zooming/scrolling during playback outruns the
+    // background thread - the more it lags, the more of the screen would
+    // otherwise fall outside the texture's coverage and show as a
+    // pixelated/stretched edge (clamped to whichever real block sits at the
+    // texture's boundary - see the shader's outOfRangeCoverage). This
+    // doesn't reduce resolution (level selection still targets one texel
+    // per screen pixel; a wider request can only push it to a FINER level
+    // if one now fits), it just costs a bit more memory/CPU per rebuild in
+    // exchange for needing fewer of them to keep up.
+    static constexpr float kTextureWindowPadding = 2.0f;
+    struct BuildRequest
+    {
+        double viewStart = 0.0;
+        double viewLength = 1.0;
+        int targetWidth = 1;
+        int safeMaxWidth = 4096;
+        juce::uint32 generation = 0;
+    };
+
+    struct BuildResult
+    {
+        juce::uint32 generation = 0;
+        int textureWidth = 0;
+        std::vector<juce::uint8> pixels;
+        std::vector<juce::uint8> midPixels;
+        double textureViewStart = 0.0;
+        double textureViewLength = 1.0;
+    };
+
+    void run() override; // juce::Thread
+    BuildResult buildTextureData(const BuildRequest& request);
+    void applyBuildResult(BuildResult& result); // GL-thread-only
+
+    juce::WaitableEvent buildRequestEvent;
+
+    juce::CriticalSection requestLock;
+    BuildRequest pendingRequest;
+    bool hasPendingRequest = false;
+
+    juce::CriticalSection resultLock;
+    BuildResult readyResult;
+    bool hasReadyResult = false;
+
+    // Bumped (message/GL thread, wherever a rebuild is requested from) for
+    // every posted request and compared against a completed result's own
+    // generation so the GL thread can tell "a fresher result than what's
+    // currently on screen" apart from "the same one we already applied".
+    std::atomic<juce::uint32> nextGeneration { 1 };
+    juce::uint32 displayedGeneration = 0; // GL-thread-only
+
+    // GL_MAX_TEXTURE_SIZE can only be queried with a current GL context, so
+    // it's read once in newOpenGLContextCreated (GL thread) and cached here
+    // for the background thread (which has no GL context at all) to read.
+    std::atomic<int> safeMaxTextureWidth { 4096 };
+
+    // Worker-thread-only: which AudioEngine::getLoadGeneration() the tile
+    // cache above was built against, so a new file (detected via that
+    // counter changing) drops the old file's now-meaningless cached tiles
+    // without the message thread having to reach across and clear it itself.
+    int workerCachedLoadGeneration = -1;
+    // ---------------------------------------------------------------------
 
     // AudioEngine::getPosition() only actually CHANGES value once per audio
     // device callback buffer (commonly every ~10-30ms, sometimes more) -
@@ -154,15 +278,28 @@ private:
 
     std::unique_ptr<juce::OpenGLShaderProgram> shader;
     GLuint vertexBuffer = 0;
-    GLuint waveformTexture = 0;   // R=min, G=max, B=lowEnergy, A=highEnergy
-    GLuint midTexture = 0;        // R=midEnergy (G/B/A unused)
+
+    // Double-buffered ("vblank buffered") texture pairs: index [0] and [1]
+    // each hold a complete waveform+mid texture. A rebuild always writes
+    // into the INACTIVE slot (the one not currently bound for sampling by
+    // the draw call), and activeTextureSlot only flips to it once the
+    // upload has fully completed - so the texture actively being sampled
+    // this frame is never the one mid-mutation, and a slow rebuild can never
+    // leave the screen showing a half-updated texture. This mirrors classic
+    // front/back-buffer double buffering, just for this one texture rather
+    // than the whole framebuffer (which JUCE's OpenGLContext already
+    // double-buffers via the driver/vsync swap chain).
+    GLuint waveformTextures[2] = { 0, 0 };   // R=min, G=max, B=lowEnergy, A=highEnergy
+    GLuint midTextures[2] = { 0, 0 };        // R=midEnergy (G/B/A unused)
+    int allocatedTextureWidths[2] = { -1, -1 }; // GL-thread-only: what glTexImage2D last allocated per slot
+    int activeTextureSlot = 0;
+
     // Flipped true from the message thread (setViewRange, resized) and read
-    // and cleared from the GL render thread (renderOpenGL/uploadWaveformTexture)
-    // - atomic so that handoff is properly visible across threads without
-    // holding dataLock for the whole (potentially non-trivial) texture rebuild.
+    // and cleared from the GL render thread (renderOpenGL, once it's posted
+    // a rebuild request for the current view to the background thread) -
+    // atomic so that handoff is properly visible across threads.
     std::atomic<bool> textureDirty { true };
     int textureWidth = 0;
-    int allocatedTextureWidth = -1; // GL-thread-only: what glTexImage2D last actually allocated for both textures
 
     // Wall-clock duration of the last glDrawArrays call, and the highest
     // that's ever been, for the on-screen frame-time readout. Written on
