@@ -7,6 +7,10 @@ MainComponent::MainComponent()
     addAndMakeVisible(stopButton);
     addAndMakeVisible(rewindButton);
     addAndMakeVisible(followPlayheadButton);
+    addAndMakeVisible(presetCombo);
+    addAndMakeVisible(presetNameEditor);
+    addAndMakeVisible(savePresetButton);
+    addAndMakeVisible(loadPresetButton);
     addAndMakeVisible(fileLabel);
     addAndMakeVisible(waveform);
     addAndMakeVisible(scrollbar);
@@ -26,6 +30,21 @@ MainComponent::MainComponent()
     stopButton.onClick = [this] { audioEngine.stop(); };
     rewindButton.onClick = [this] { audioEngine.setPosition(0.0); waveform.notifyPositionChangedExternally(); };
     followPlayheadButton.onClick = [this] { waveform.setFollowPlayhead(followPlayheadButton.getToggleState()); };
+    savePresetButton.onClick = [this] { savePreset(); };
+    loadPresetButton.onClick = [this] { loadPreset(); };
+
+    presetCombo.setTextWhenNothingSelected("Presets...");
+    presetCombo.setTextWhenNoChoicesAvailable("No presets yet");
+    presetCombo.setTooltip("Choose an existing preset to recall or overwrite");
+    presetCombo.onChange = [this]
+    {
+        if (presetCombo.getSelectedId() > 0)
+            presetNameEditor.setText(presetCombo.getText(), juce::dontSendNotification);
+    };
+    presetNameEditor.setTextToShowWhenEmpty("New preset name", juce::Colours::grey);
+    presetNameEditor.setTooltip("Type a name here, then click Save");
+    savePresetButton.setTooltip("Save all current waveform settings to this preset");
+    loadPresetButton.setTooltip("Recall the selected preset");
 
     followPlayheadButton.setToggleState(true, juce::dontSendNotification);
     waveform.setFollowPlayhead(true);
@@ -38,6 +57,8 @@ MainComponent::MainComponent()
     stopButton.setWantsKeyboardFocus(false);
     rewindButton.setWantsKeyboardFocus(false);
     followPlayheadButton.setWantsKeyboardFocus(false);
+    savePresetButton.setWantsKeyboardFocus(false);
+    loadPresetButton.setWantsKeyboardFocus(false);
 
     setWantsKeyboardFocus(true);
 
@@ -57,6 +78,24 @@ MainComponent::MainComponent()
     {
         waveform.setParameters(p);
     };
+
+    juce::String presetError;
+    if (!presetStore.reload(presetError))
+    {
+        showPresetError(presetError);
+    }
+    else
+    {
+        refreshPresetList();
+
+        WaveformParameters startupPreset;
+        if (presetStore.recallPreset(presetStore.getLastPresetName(), startupPreset))
+        {
+            applyPreset(startupPreset);
+            presetCombo.setText(presetStore.getLastPresetName(), juce::dontSendNotification);
+            presetNameEditor.setText(presetStore.getLastPresetName(), juce::dontSendNotification);
+        }
+    }
 
     setSize(1000, 600);
     startTimerHz(30);
@@ -94,6 +133,14 @@ void MainComponent::resized()
     topBar.removeFromLeft(8);
     followPlayheadButton.setBounds(topBar.removeFromLeft(140));
     topBar.removeFromLeft(8);
+    presetCombo.setBounds(topBar.removeFromLeft(110));
+    topBar.removeFromLeft(4);
+    presetNameEditor.setBounds(topBar.removeFromLeft(120));
+    topBar.removeFromLeft(4);
+    savePresetButton.setBounds(topBar.removeFromLeft(52));
+    topBar.removeFromLeft(4);
+    loadPresetButton.setBounds(topBar.removeFromLeft(52));
+    topBar.removeFromLeft(8);
     fileLabel.setBounds(topBar);
 
     auto paramsArea = area.removeFromRight(240);
@@ -109,6 +156,64 @@ void MainComponent::resized()
     // lines of draw-call/frame timing stats.
     auto fullBounds = getLocalBounds();
     frameTimeLabel.setBounds(fullBounds.removeFromBottom(40).removeFromRight(230));
+}
+
+void MainComponent::savePreset()
+{
+    const auto name = presetNameEditor.getText().trim();
+    juce::String error;
+    if (!presetStore.savePreset(name, waveform.getParameters(), error))
+    {
+        showPresetError(error);
+        return;
+    }
+
+    refreshPresetList();
+    presetCombo.setText(name, juce::dontSendNotification);
+    presetNameEditor.setText(name, juce::dontSendNotification);
+}
+
+void MainComponent::loadPreset()
+{
+    const auto name = presetCombo.getText().trim();
+    WaveformParameters parameters;
+    if (!presetStore.recallPreset(name, parameters))
+    {
+        showPresetError(name.isEmpty() ? "Choose a preset to load."
+                                       : "No preset named \"" + name + "\" was found.");
+        return;
+    }
+
+    applyPreset(parameters);
+
+    juce::String error;
+    if (!presetStore.rememberLastPreset(name, error))
+        showPresetError(error);
+}
+
+void MainComponent::refreshPresetList()
+{
+    const auto selectedText = presetCombo.getText();
+    presetCombo.clear(juce::dontSendNotification);
+
+    const auto names = presetStore.getPresetNames();
+    for (int i = 0; i < names.size(); ++i)
+        presetCombo.addItem(names[i], i + 1);
+
+    presetCombo.setText(selectedText, juce::dontSendNotification);
+}
+
+void MainComponent::applyPreset(const WaveformParameters& parameters)
+{
+    waveform.setParameters(parameters);
+    parametersPanel.setParameters(parameters);
+}
+
+void MainComponent::showPresetError(const juce::String& message)
+{
+    juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon,
+                                           "Preset Error",
+                                           message);
 }
 
 bool MainComponent::isInterestedInFileDrag(const juce::StringArray& files)

@@ -37,6 +37,7 @@ target_sources(WaveformDisplay
         Source/AudioEngine.cpp
         Source/WaveformComponent.cpp
         Source/ParametersPanel.cpp
+        Source/PresetStore.cpp
 )
 
 target_compile_definitions(WaveformDisplay
