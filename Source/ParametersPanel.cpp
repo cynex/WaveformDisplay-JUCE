@@ -49,12 +49,9 @@ ParametersPanel::ParametersPanel()
     addAndMakeVisible(midSwatch);
     addAndMakeVisible(highSwatch);
     addAndMakeVisible(playheadSwatch);
-    addAndMakeVisible(solidColourButton);
-    addAndMakeVisible(lowColourButton);
-    addAndMakeVisible(midColourButton);
-    addAndMakeVisible(highColourButton);
     addAndMakeVisible(playheadLabel);
-    addAndMakeVisible(playheadColourButton);
+    addAndMakeVisible(amplitudeSwatch);
+    addAndMakeVisible(amplitudeLabel);
     addAndMakeVisible(tintingEnabledButton);
 
     solidSwatch.setColour(params.solidColour);
@@ -62,6 +59,7 @@ ParametersPanel::ParametersPanel()
     midSwatch.setColour(params.midFreqColour);
     highSwatch.setColour(params.highFreqColour);
     playheadSwatch.setColour(params.playheadColour);
+    amplitudeSwatch.setColour(params.amplitudeColour);
 
     addAndMakeVisible(lowAmountLabel);
     addAndMakeVisible(lowAmountSlider);
@@ -70,48 +68,100 @@ ParametersPanel::ParametersPanel()
     addAndMakeVisible(highAmountLabel);
     addAndMakeVisible(highAmountSlider);
 
+    addAndMakeVisible(midPoleLabel);
+    addAndMakeVisible(midPoleSlider);
+
     addAndMakeVisible(aaLabel);
     addAndMakeVisible(aaSlider);
     addAndMakeVisible(smoothingLabel);
     addAndMakeVisible(smoothingSlider);
+    addAndMakeVisible(waveformHeightLabel);
+    addAndMakeVisible(waveformHeightSlider);
     addAndMakeVisible(centreLineAlphaLabel);
     addAndMakeVisible(centreLineAlphaSlider);
+
+    addAndMakeVisible(amplitudeAmountLabel);
+    addAndMakeVisible(amplitudeAmountSlider);
+    addAndMakeVisible(amplitudeColorAmountLabel);
+    addAndMakeVisible(amplitudeColorAmountSlider);
+    addAndMakeVisible(amplitudeGlowRadiusLabel);
+    addAndMakeVisible(amplitudeGlowRadiusSlider);
+    addAndMakeVisible(amplitudeRangeLabel);
+    addAndMakeVisible(amplitudeRangeSlider);
+    addAndMakeVisible(amplitudeSlopeLabel);
+    addAndMakeVisible(amplitudeSlopeSlider);
+    addAndMakeVisible(amplitudeMinFreqLabel);
+    addAndMakeVisible(amplitudeMinFreqSlider);
+    addAndMakeVisible(amplitudeMaxFreqLabel);
+    addAndMakeVisible(amplitudeMaxFreqSlider);
 
     configureSlider(lowAmountSlider, 0.0, 1.0, params.lowFreqAmount);
     configureSlider(midAmountSlider, 0.0, 1.0, params.midFreqAmount);
     configureSlider(highAmountSlider, 0.0, 1.0, params.highFreqAmount);
+    configureSlider(midPoleSlider, 0.01, 0.99, params.midPole);
     configureSlider(aaSlider, 0.1, 8.0, params.aaWidth);
     configureSlider(smoothingSlider, 0.0, 1.0, params.smoothing);
+    configureSlider(waveformHeightSlider, 0.1, 1.0, params.waveformHeight);
     configureSlider(centreLineAlphaSlider, 0.0, 1.0, params.centreLineAlpha);
+    configureSlider(amplitudeAmountSlider, 0.0, 1.0, params.amplitudeAmount);
+    configureSlider(amplitudeColorAmountSlider, 0.0, 4.0, params.amplitudeColorAmount);
+    configureSlider(amplitudeGlowRadiusSlider, 0.0, 250.0, params.amplitudeGlowRadius);
+    configureSlider(amplitudeRangeSlider, 0.0001, 0.25, params.amplitudeRange);
+    configureSlider(amplitudeSlopeSlider, 1.0, 12.0, params.amplitudeSlope);
+
+    // Frequency sliders are log-skewed (setSkewFactorFromMidPoint) rather
+    // than linear - a linear 20-20000Hz slider would spend almost all of
+    // its travel above a few kHz, making the low end (where the fixed
+    // 300Hz low/mid split point actually lives) nearly unusable to dial in.
+    configureSlider(amplitudeMinFreqSlider, 20.0, 20000.0, params.amplitudeMinFrequencyHz);
+    amplitudeMinFreqSlider.setSkewFactorFromMidPoint(1000.0);
+    amplitudeMinFreqSlider.setTextValueSuffix(" Hz");
+    configureSlider(amplitudeMaxFreqSlider, 20.0, 20000.0, params.amplitudeMaxFrequencyHz);
+    amplitudeMaxFreqSlider.setSkewFactorFromMidPoint(1000.0);
+    amplitudeMaxFreqSlider.setTextValueSuffix(" Hz");
+
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
-    solidColourButton.onClick = [this]
+    solidSwatch.onClick = [this]
     {
         showColourPicker(*this, params.solidColour, [this](juce::Colour c) { params.solidColour = c; solidSwatch.setColour(c); notify(); });
     };
-    lowColourButton.onClick = [this]
+    lowSwatch.onClick = [this]
     {
         showColourPicker(*this, params.lowFreqColour, [this](juce::Colour c) { params.lowFreqColour = c; lowSwatch.setColour(c); notify(); });
     };
-    midColourButton.onClick = [this]
+    midSwatch.onClick = [this]
     {
         showColourPicker(*this, params.midFreqColour, [this](juce::Colour c) { params.midFreqColour = c; midSwatch.setColour(c); notify(); });
     };
-    highColourButton.onClick = [this]
+    highSwatch.onClick = [this]
     {
         showColourPicker(*this, params.highFreqColour, [this](juce::Colour c) { params.highFreqColour = c; highSwatch.setColour(c); notify(); });
     };
-    playheadColourButton.onClick = [this]
+    playheadSwatch.onClick = [this]
     {
         showColourPicker(*this, params.playheadColour, [this](juce::Colour c) { params.playheadColour = c; playheadSwatch.setColour(c); notify(); });
+    };
+    amplitudeSwatch.onClick = [this]
+    {
+        showColourPicker(*this, params.amplitudeColour, [this](juce::Colour c) { params.amplitudeColour = c; amplitudeSwatch.setColour(c); notify(); });
     };
 
     lowAmountSlider.onValueChange = [this] { params.lowFreqAmount = (float) lowAmountSlider.getValue(); notify(); };
     midAmountSlider.onValueChange = [this] { params.midFreqAmount = (float) midAmountSlider.getValue(); notify(); };
     highAmountSlider.onValueChange = [this] { params.highFreqAmount = (float) highAmountSlider.getValue(); notify(); };
+    midPoleSlider.onValueChange = [this] { params.midPole = (float) midPoleSlider.getValue(); notify(); };
     aaSlider.onValueChange = [this] { params.aaWidth = (float) aaSlider.getValue(); notify(); };
     smoothingSlider.onValueChange = [this] { params.smoothing = (float) smoothingSlider.getValue(); notify(); };
+    waveformHeightSlider.onValueChange = [this] { params.waveformHeight = (float) waveformHeightSlider.getValue(); notify(); };
     centreLineAlphaSlider.onValueChange = [this] { params.centreLineAlpha = (float) centreLineAlphaSlider.getValue(); notify(); };
+    amplitudeAmountSlider.onValueChange = [this] { params.amplitudeAmount = (float) amplitudeAmountSlider.getValue(); notify(); };
+    amplitudeColorAmountSlider.onValueChange = [this] { params.amplitudeColorAmount = (float) amplitudeColorAmountSlider.getValue(); notify(); };
+    amplitudeGlowRadiusSlider.onValueChange = [this] { params.amplitudeGlowRadius = (float) amplitudeGlowRadiusSlider.getValue(); notify(); };
+    amplitudeRangeSlider.onValueChange = [this] { params.amplitudeRange = (float) amplitudeRangeSlider.getValue(); notify(); };
+    amplitudeSlopeSlider.onValueChange = [this] { params.amplitudeSlope = (float) amplitudeSlopeSlider.getValue(); notify(); };
+    amplitudeMinFreqSlider.onValueChange = [this] { params.amplitudeMinFrequencyHz = (float) amplitudeMinFreqSlider.getValue(); notify(); };
+    amplitudeMaxFreqSlider.onValueChange = [this] { params.amplitudeMaxFrequencyHz = (float) amplitudeMaxFreqSlider.getValue(); notify(); };
     tintingEnabledButton.onClick = [this] { params.tintingEnabled = tintingEnabledButton.getToggleState(); notify(); };
 }
 
@@ -121,9 +171,18 @@ void ParametersPanel::setParameters(const WaveformParameters& p)
     lowAmountSlider.setValue(params.lowFreqAmount, juce::dontSendNotification);
     midAmountSlider.setValue(params.midFreqAmount, juce::dontSendNotification);
     highAmountSlider.setValue(params.highFreqAmount, juce::dontSendNotification);
+    midPoleSlider.setValue(params.midPole, juce::dontSendNotification);
     aaSlider.setValue(params.aaWidth, juce::dontSendNotification);
     smoothingSlider.setValue(params.smoothing, juce::dontSendNotification);
+    waveformHeightSlider.setValue(params.waveformHeight, juce::dontSendNotification);
     centreLineAlphaSlider.setValue(params.centreLineAlpha, juce::dontSendNotification);
+    amplitudeAmountSlider.setValue(params.amplitudeAmount, juce::dontSendNotification);
+    amplitudeColorAmountSlider.setValue(params.amplitudeColorAmount, juce::dontSendNotification);
+    amplitudeGlowRadiusSlider.setValue(params.amplitudeGlowRadius, juce::dontSendNotification);
+    amplitudeRangeSlider.setValue(params.amplitudeRange, juce::dontSendNotification);
+    amplitudeSlopeSlider.setValue(params.amplitudeSlope, juce::dontSendNotification);
+    amplitudeMinFreqSlider.setValue(params.amplitudeMinFrequencyHz, juce::dontSendNotification);
+    amplitudeMaxFreqSlider.setValue(params.amplitudeMaxFrequencyHz, juce::dontSendNotification);
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
     solidSwatch.setColour(params.solidColour);
@@ -131,6 +190,7 @@ void ParametersPanel::setParameters(const WaveformParameters& p)
     midSwatch.setColour(params.midFreqColour);
     highSwatch.setColour(params.highFreqColour);
     playheadSwatch.setColour(params.playheadColour);
+    amplitudeSwatch.setColour(params.amplitudeColour);
 }
 
 void ParametersPanel::notify()
@@ -154,31 +214,40 @@ void ParametersPanel::resized()
         area.removeFromTop(gap);
     };
 
-    auto colourRow = [&](ColourSwatch& swatch, juce::Component& label, juce::Component& control)
+    auto colourRow = [&](ColourSwatch& swatch, juce::Component& label)
     {
         auto r = area.removeFromTop(rowH);
         auto swatchArea = r.removeFromLeft(swatchSize);
         swatch.setBounds(swatchArea.withSizeKeepingCentre(swatchSize, swatchSize));
         r.removeFromLeft(gap);
-        label.setBounds(r.removeFromLeft(100));
-        control.setBounds(r);
+        label.setBounds(r);
         area.removeFromTop(gap);
     };
 
-    colourRow(solidSwatch, solidLabel, solidColourButton);
+    colourRow(solidSwatch, solidLabel);
 
     tintingEnabledButton.setBounds(area.removeFromTop(rowH));
     area.removeFromTop(gap);
 
-    colourRow(lowSwatch, lowLabel, lowColourButton);
-    colourRow(midSwatch, midLabel, midColourButton);
-    colourRow(highSwatch, highLabel, highColourButton);
-    colourRow(playheadSwatch, playheadLabel, playheadColourButton);
+    colourRow(lowSwatch, lowLabel);
+    colourRow(midSwatch, midLabel);
+    colourRow(highSwatch, highLabel);
+    colourRow(playheadSwatch, playheadLabel);
+    colourRow(amplitudeSwatch, amplitudeLabel);
 
     row(lowAmountLabel, lowAmountSlider);
     row(midAmountLabel, midAmountSlider);
     row(highAmountLabel, highAmountSlider);
+    row(midPoleLabel, midPoleSlider);
     row(aaLabel, aaSlider);
     row(smoothingLabel, smoothingSlider);
+    row(waveformHeightLabel, waveformHeightSlider);
     row(centreLineAlphaLabel, centreLineAlphaSlider);
+    row(amplitudeAmountLabel, amplitudeAmountSlider);
+    row(amplitudeColorAmountLabel, amplitudeColorAmountSlider);
+    row(amplitudeGlowRadiusLabel, amplitudeGlowRadiusSlider);
+    row(amplitudeRangeLabel, amplitudeRangeSlider);
+    row(amplitudeSlopeLabel, amplitudeSlopeSlider);
+    row(amplitudeMinFreqLabel, amplitudeMinFreqSlider);
+    row(amplitudeMaxFreqLabel, amplitudeMaxFreqSlider);
 }

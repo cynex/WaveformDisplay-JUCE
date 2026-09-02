@@ -4,10 +4,15 @@
 #include "WaveformParameters.h"
 
 /** Small filled square with a white outline showing a colour parameter's
-    current value, drawn just to the left of its label. */
+    current value, drawn just to the left of its label - and itself the
+    clickable control that opens the colour picker (a separate "..." button
+    for that was judged unintuitive; the swatch IS the colour, so clicking
+    on it to change it is the more obvious affordance). */
 class ColourSwatch : public juce::Component
 {
 public:
+    ColourSwatch() { setMouseCursor(juce::MouseCursor::PointingHandCursor); }
+
     void setColour(juce::Colour newColour)
     {
         colour = newColour;
@@ -22,6 +27,18 @@ public:
         g.setColour(juce::Colours::white);
         g.drawRect(bounds, 1.0f);
     }
+
+    void mouseUp(const juce::MouseEvent& e) override
+    {
+        // Only on a genuine click (release still within bounds), matching
+        // normal button behaviour - a click-drag off the swatch and back
+        // shouldn't accidentally fire it, and dragging away and releasing
+        // elsewhere shouldn't either.
+        if (contains(e.getPosition()) && onClick != nullptr)
+            onClick();
+    }
+
+    std::function<void()> onClick;
 
 private:
     juce::Colour colour;
@@ -48,18 +65,14 @@ private:
     juce::Label midLabel{ {}, "Mid-Freq Tint" };
     juce::Label highLabel{ {}, "High-Freq Tint" };
     juce::Label playheadLabel{ {}, "Playhead" };
+    juce::Label amplitudeLabel{ {}, "Amplitude Colour" };
 
     ColourSwatch solidSwatch;
     ColourSwatch lowSwatch;
     ColourSwatch midSwatch;
     ColourSwatch highSwatch;
     ColourSwatch playheadSwatch;
-
-    juce::TextButton solidColourButton{ "..." };
-    juce::TextButton lowColourButton{ "..." };
-    juce::TextButton midColourButton{ "..." };
-    juce::TextButton highColourButton{ "..." };
-    juce::TextButton playheadColourButton{ "..." };
+    ColourSwatch amplitudeSwatch;
 
     juce::ToggleButton tintingEnabledButton{ "Enable Tinting" };
 
@@ -70,12 +83,34 @@ private:
     juce::Label highAmountLabel{ {}, "High Amount" };
     juce::Slider highAmountSlider;
 
+    juce::Label midPoleLabel{ {}, "Mid Pole" };
+    juce::Slider midPoleSlider;
+
     juce::Label aaLabel{ {}, "AA Width" };
     juce::Slider aaSlider;
     juce::Label smoothingLabel{ {}, "Smoothing" };
     juce::Slider smoothingSlider;
+    juce::Label waveformHeightLabel{ {}, "Waveform Height" };
+    juce::Slider waveformHeightSlider;
     juce::Label centreLineAlphaLabel{ {}, "Centre Line" };
     juce::Slider centreLineAlphaSlider;
+
+    // Placed after Centre Line, at the bottom of the slider stack - see the
+    // constructor/resized() ordering.
+    juce::Label amplitudeAmountLabel{ {}, "Amplitude Amount" };
+    juce::Slider amplitudeAmountSlider;
+    juce::Label amplitudeColorAmountLabel{ {}, "Amplitude Color Amt" };
+    juce::Slider amplitudeColorAmountSlider;
+    juce::Label amplitudeGlowRadiusLabel{ {}, "Amplitude Glow Radius" };
+    juce::Slider amplitudeGlowRadiusSlider;
+    juce::Label amplitudeRangeLabel{ {}, "Amplitude Range" };
+    juce::Slider amplitudeRangeSlider;
+    juce::Label amplitudeSlopeLabel{ {}, "Amplitude Slope" };
+    juce::Slider amplitudeSlopeSlider;
+    juce::Label amplitudeMinFreqLabel{ {}, "Amp Min Freq" };
+    juce::Slider amplitudeMinFreqSlider;
+    juce::Label amplitudeMaxFreqLabel{ {}, "Amp Max Freq" };
+    juce::Slider amplitudeMaxFreqSlider;
 
     WaveformParameters params;
 

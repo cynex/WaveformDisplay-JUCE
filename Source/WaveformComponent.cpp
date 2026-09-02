@@ -74,17 +74,141 @@ namespace
         uniform float lowAmount;
         uniform float midAmount;
         uniform float highAmount;
+        uniform float midPole;          // 0..1 pivot for how strongly midE reads in the blend - see WaveformParameters::midPole
+        uniform float waveformHeight;   // nominal height scale applied BEFORE the amplitude boost - see WaveformParameters::waveformHeight
+        uniform float amplitudeAmount;  // 0..1 mix towards the exaggerated amplitude-driven height boost - see WaveformParameters::amplitudeAmount
+        uniform float amplitudeColorAmount; // 0..4 strength of the additive colour glow - see WaveformParameters::amplitudeColorAmount
+        uniform float amplitudeGlowRadius; // pixels - how far the outer halo bleeds past the waveform's silhouette - see WaveformParameters::amplitudeGlowRadius
+        uniform float amplitudePulse;   // 0..1, CPU-smoothed overall amplitude AT THE PLAYHEAD right now - see WaveformComponent::AmplitudePulseTracker
+        uniform float amplitudeRangeNorm; // 0..1 fraction of the view width the amplitude effect is allowed to fade out over, centred on the playhead - see WaveformParameters::amplitudeRange
+        uniform float amplitudeSlope;   // gamma exponent for the amplitude-driving curve - see WaveformParameters::amplitudeSlope / ampCurve
+        uniform vec3 amplitudeBandWeights; // (low, mid, high) blend weights, summing to 1, from amplitudeMinFrequencyHz/amplitudeMaxFrequencyHz - see WaveformComponent::computeAmplitudeBandWeights
         uniform float tintEnabled;      // 0 or 1 - master switch for low/mid/high tinting
         uniform vec3 backgroundColour;
         uniform vec3 playheadColour;
         uniform float playheadViewFrac; // playback position, 0..1 across the CURRENT view
         uniform float playheadVisible;  // 0 or 1
         uniform float centreLineAlpha;  // opacity of the solid white zero-amplitude axis line, 0..1
+        uniform vec3 amplitudeColour;   // additive glow colour driven by the amplitude pulse - see WaveformParameters::amplitudeColour
 
-        float coverageFor(vec4 texel, float y, float edge, float smoothingAmount)
+        // Fixed ceiling on how far a fully loud, fully-pulsing block right
+        // at the playhead can be inflated when effectiveHeightBoost == 1.0 -
+        // deliberately a large, exaggerated multiplier (see the "fun, not
+        // accurate" intent below), not something exposed as its own slider.
+        // amplitudeAmount's whole 0..1 range is a mix towards/away from
+        // this fixed curve, not a multiplier of its own that could stack
+        // with a separate "how much" control.
+        const float kMaxAmplitudeMultiplier = 3.0;
+
+        // Remaps x (0..1) through a logarithmic curve that rises steeply
+        // near 0 and flattens out towards 1 - used for the amplitude
+        // effect's distance-from-playhead falloff (sampleWaveform's
+        // rangeCoverage). NOTE: for small x, log(1+x*steepness) is
+        // approximately LINEAR in x (log(1+t) ~= t for small t) - that's
+        // fine for a spatial falloff, which only needs a soft tail, but it
+        // means this curve does NOT give a strongly lifted response to
+        // small inputs - see ampCurve below, which is what the amplitude
+        // effect itself now uses specifically because a real boost for
+        // quiet material is the whole point there.
+        float logCurve(float x, float steepness)
+        {
+            float xClamped = clamp(x, 0.0, 1.0);
+            return log(1.0 + xClamped * steepness) / log(1.0 + steepness);
+        }
+
+        // Remaps x (0..1) through a gamma/power curve (x^(1/gamma)) rather
+        // than the logarithmic one above - chosen specifically because a
+        // log curve's response to genuinely QUIET input is close to linear
+        // (see logCurve's note), so subtle/quiet audio barely moved the
+        // boost/glow at all, reading as "no action" until the audio was
+        // already fairly loud. A gamma curve with gamma > 1 lifts small x
+        // MUCH more aggressively than log does - x=0.01 at gamma=4 maps to
+        // ~0.32, versus ~0.09 under the old log curve at a comparable
+        // steepness - so even quiet passages now produce a clearly visible
+        // pulse, while gamma==1 is the identity (no lift at all) and the
+        // curve still always reaches exactly 1.0 at x==1 (a hit still reads
+        // as full strength, never overshooting). This is the standard
+        // "gamma correction" shape (same one used to brighten shadows in
+        // images) - reads as more dramatic/"exponential-feeling" than the
+        // log curve specifically because of how much harder it lifts the
+        // low end, not because it grows faster at the top.
+        float ampCurve(float x, float gamma)
+        {
+            float xClamped = clamp(x, 0.0, 1.0);
+            float gammaSafe = max(gamma, 0.0001);
+            return pow(xClamped, 1.0 / gammaSafe);
+        }
+
+        // effectiveHeightBoost and effectiveGlowAmount are the FINAL,
+        // already-combined strengths for this fragment - amplitudeAmount
+        // (0..1, the height-boost slider) or amplitudeColorAmount (0..4,
+        // the colour-glow slider, allowed past 1 for extra-bright pulses)
+        // respectively, each times amplitudePulse (the CPU-smoothed
+        // envelope of amplitude at the playhead right now, computed once in
+        // sampleWaveform/main and reused here) times however much this
+        // fragment's rangeCoverage (logarithmic distance-from-playhead
+        // falloff, also computed once in sampleWaveform) lets through.
+        // coverageFor itself stays ignorant of pulse/range - it just
+        // applies whatever final amounts it's handed. Kept as two SEPARATE
+        // inputs (not one shared amount) specifically so the colour glow
+        // can be pushed well past what the height boost is doing, per the
+        // "its own parameter, goes past 1" ask - the underlying pulse/range
+        // timing they both ride on stays shared, so the two still read as
+        // one coordinated pulse rather than two independently-timed effects.
+        float coverageFor(vec4 texel, float midE, float y, float edge, float smoothingAmount, float waveformHeightAmount, float effectiveHeightBoost, float effectiveGlowAmount, out float glowOut, out float haloOut)
         {
             float minV = texel.r * 2.0 - 1.0;
             float maxV = texel.g * 2.0 - 1.0;
+
+            // The value that actually DRIVES the boost/glow is a blend of
+            // this block's low/mid/high band energies (texel.b, midE,
+            // texel.a - each already 0..1), weighted by amplitudeBandWeights
+            // (from amplitudeMinFrequencyHz/amplitudeMaxFrequencyHz), rather
+            // than the block's raw broadband peak amplitude - so narrowing
+            // that frequency range (e.g. towards the mid band) makes the
+            // effect track energy in just that range instead of reacting to
+            // the whole spectrum. amplitudeSlope (user-controlled - now a
+            // gamma exponent, see ampCurve) sets how strongly quiet input
+            // gets lifted before it becomes boost/glow strength.
+            float ampBand = clamp(texel.b * amplitudeBandWeights.x + midE * amplitudeBandWeights.y + texel.a * amplitudeBandWeights.z, 0.0, 1.0);
+            float ampCurved = ampCurve(ampBand, amplitudeSlope);
+
+            // Nominal height scale, applied BEFORE the boost multiplier -
+            // shrinking the waveform's baseline height first is what gives
+            // the boost actual headroom to visibly inflate a block without
+            // immediately hitting the +/-1 clamp below: a block already
+            // sitting near +/-1 at full nominal height has nowhere left to
+            // grow, so the boost effect reads as "crushed"/invisible right
+            // where it should be most dramatic (the loudest moments). See
+            // WaveformParameters::waveformHeight.
+            minV *= waveformHeightAmount;
+            maxV *= waveformHeightAmount;
+
+            // "Amplitude boost": inflate this block's rendered envelope
+            // height, so loud moments visibly bulge the waveform's
+            // silhouette outward rather than just tinting a different
+            // colour - a deliberately exaggerated, fun/intuitive way to see
+            // a beat move through the waveform, not an accurate amplitude
+            // readout. effectiveHeightBoost is a straight mix between "no
+            // change at all" (0) and the full amplitude-modulated curve
+            // (1), rather than its own multiplier - so 0 (amplitudeAmount,
+            // amplitudePulse, or rangeCoverage each independently) is
+            // guaranteed to be exactly a no-op.
+            float fullBoost = 1.0 + ampCurved * kMaxAmplitudeMultiplier;
+            float boost = mix(1.0, fullBoost, clamp(effectiveHeightBoost, 0.0, 1.0));
+
+            // NOT clamped to 1 - amplitudeColorAmount is allowed up to 4,
+            // and the glow is a purely additive light effect (see
+            // sampleWaveform), so there's no "overflow" concern the way
+            // there is for the height boost's +/-1 amplitude range below;
+            // only guarded against going negative.
+            glowOut = ampCurved * max(effectiveGlowAmount, 0.0);
+
+            // Clamped back to the real -1..1 amplitude range afterwards, so
+            // an over-boosted block just reads as "full height" during a
+            // loud hit instead of actually overflowing the component.
+            minV = clamp(minV * boost, -1.0, 1.0);
+            maxV = clamp(maxV * boost, -1.0, 1.0);
 
             // Guard against a degenerate (silent) block so it still renders a thin line.
             float halfHeight = max((maxV - minV) * 0.5, 0.002);
@@ -104,7 +228,39 @@ namespace
             // Signed distance (in amplitude units) from the fragment to the envelope band:
             // negative = inside the waveform, positive = outside.
             float dist = abs(y - centre) - halfHeight;
-            return 1.0 - smoothstep(-feather, feather, dist);
+            float coverage = 1.0 - smoothstep(-feather, feather, dist);
+
+            // Outer glow: an additive halo flooding the NEGATIVE SPACE
+            // around the waveform's own silhouette, using the exact same
+            // amplitude-driven glowOut as its gain - so the halo
+            // brightens/dims in lockstep with the interior colour glow,
+            // both riding the one shared amplitude pulse (see the class
+            // comment on effectiveGlowAmount). Falls off exponentially with
+            // distance PAST the edge (amplitudeGlowRadius, in pixels,
+            // converted to the same amplitude-unit space as `dist` via
+            // pixelToAmp - matching how aaWidth/edge are converted
+            // elsewhere), and is scaled by (1.0 - coverage) so it only
+            // actually shows up where the waveform's own shape has already
+            // faded towards background - without that, a wide radius would
+            // double up with (and could outshine) the interior glow already
+            // applied on top of the solid shape.
+            //
+            // kHaloIntensityMultiplier pushes the halo noticeably brighter
+            // than glowOut's raw value on its own - the interior glow is
+            // deliberately subtle (it's tinting an already-solid,
+            // already-coloured shape, so a little goes a long way), but the
+            // SAME raw strength spread out across open background space
+            // reads as much fainter unless boosted - this is what makes the
+            // ambient "glow filling the space around the waveform" actually
+            // visible instead of a barely-there edge fringe.
+            const float kHaloIntensityMultiplier = 3.0;
+            float pixelToAmpForGlow = 2.0 / max(pixelHeight, 1.0);
+            float glowRadiusAmp = max(amplitudeGlowRadius * pixelToAmpForGlow, 0.0001);
+            float distOutside = max(dist, 0.0);
+            float haloFalloff = exp(-distOutside / glowRadiusAmp);
+            haloOut = glowOut * haloFalloff * (1.0 - coverage) * kHaloIntensityMultiplier;
+
+            return coverage;
         }
 
         // Everything x-position-dependent up through the waveform's own
@@ -164,8 +320,41 @@ namespace
             float pixelToAmp = 2.0 / max(pixelHeight, 1.0);
             float edge = max(aaWidth * pixelToAmp, 0.0001);
 
-            float coverage0 = coverageFor(texel0, y, edge, smoothing);
-            float coverage1 = coverageFor(texel1, y, edge, smoothing);
+            // Spatial mask for the amplitude effect: how much of it is let
+            // through at THIS fragment's x position, based on distance from
+            // the playhead in view-fraction space, falling off
+            // LOGARITHMICALLY rather than linearly - dNorm (0 at the
+            // playhead, 1 at the edge of amplitudeRangeNorm) is remapped
+            // through log(1 + dNorm*k)/log(1+k), which drops steeply right
+            // next to the playhead and then flattens out over the rest of
+            // the range, instead of a uniform linear fade. That reads as a
+            // distinct pulse hugging the playhead with a long soft tail,
+            // rather than a diffuse wash that fades evenly across the whole
+            // range. k (kRangeLogSteepness) is a fixed shape constant, not
+            // exposed as its own control - amplitudeRangeNorm alone (from
+            // the "Amplitude Range" slider) still fully determines how far
+            // the effect reaches. max(..., 0.0001) keeps the divide well
+            // clear of zero at the slider's own minimum.
+            const float kRangeLogSteepness = 12.0;
+            float rangeWidth = max(amplitudeRangeNorm, 0.0001);
+            float dxFromPlayhead = abs(xNorm - playheadViewFrac);
+            float dNorm = clamp(dxFromPlayhead / rangeWidth, 0.0, 1.0);
+            float rangeCoverage = 1.0 - logCurve(dNorm, kRangeLogSteepness);
+
+            // The final, fully-combined strengths for this fragment: each
+            // slider (amplitudeAmount for height, amplitudeColorAmount for
+            // colour - see coverageFor's comment for why they're kept
+            // separate), times the current amplitude pulse (0 outside of
+            // playback - see AmplitudePulseTracker), times how much the
+            // spatial mask above lets through here. Zero in ANY of those
+            // three (for a given one) means that effect is exactly off for
+            // this fragment.
+            float effectiveHeightBoost = amplitudeAmount * amplitudePulse * rangeCoverage;
+            float effectiveGlowAmount = amplitudeColorAmount * amplitudePulse * rangeCoverage;
+
+            float glow0, glow1, halo0, halo1;
+            float coverage0 = coverageFor(texel0, midE0, y, edge, smoothing, waveformHeight, effectiveHeightBoost, effectiveGlowAmount, glow0, halo0);
+            float coverage1 = coverageFor(texel1, midE1, y, edge, smoothing, waveformHeight, effectiveHeightBoost, effectiveGlowAmount, glow1, halo1);
 
             // Blend width for the boundary crossfade, in the same fractional
             // texel units as `frac`. This is fundamental anti-aliasing of the
@@ -186,6 +375,8 @@ namespace
             float blend = smoothstep(0.5 - halfBlend, 0.5 + halfBlend, frac);
 
             float coverage = mix(coverage0, coverage1, blend);
+            float glow = mix(glow0, glow1, blend);
+            float halo = mix(halo0, halo1, blend);
             float lowE = mix(texel0.b, texel1.b, blend);
             float midE = mix(midE0, midE1, blend);
             float highE = mix(texel0.a, texel1.a, blend);
@@ -197,8 +388,19 @@ namespace
             // base visibly showing through whenever a block wasn't strongly
             // dominant in all three bands at once, which was most blocks
             // even with every amount at 1.0.
+            // midPole warps midE through a gamma curve pivoting at the
+            // chosen point (an input equal to midPole always maps to an
+            // output of 0.5) BEFORE it's weighted by midAmount - a purely
+            // visual reshaping of how strongly a given mid-energy reading
+            // presents, not a change to the energy value analysed from the
+            // audio itself. clamp() keeps log() away from 0/negative for
+            // pole values right at the ends of the slider.
+            float midPoleClamped = clamp(midPole, 0.001, 0.999);
+            float midGamma = log(0.5) / log(midPoleClamped);
+            float midEWarped = pow(clamp(midE, 0.0, 1.0), midGamma);
+
             float wLow = max(lowE * lowAmount, 0.0);
-            float wMid = max(midE * midAmount, 0.0);
+            float wMid = max(midEWarped * midAmount, 0.0);
             float wHigh = max(highE * highAmount, 0.0);
             float wSum = wLow + wMid + wHigh;
             vec3 freqBlend = wSum > 0.0001 ? (lowColour * wLow + midColour * wMid + highColour * wHigh) / wSum
@@ -206,11 +408,34 @@ namespace
 
             vec3 tint = solidColour * mix(vec3(1.0), freqBlend, tintEnabled);
 
+            // Additive amplitude glow - added directly on top of the
+            // frequency tint (not mixed/multiplied), so it brightens
+            // whatever colour is already there rather than replacing or
+            // blending with it, and applies regardless of tintEnabled since
+            // it's a separate effect from the low/mid/high tinting. Driven
+            // by amplitudeColorAmount's own effectiveGlowAmount (see
+            // coverageFor/sampleWaveform) - a SEPARATE strength from the one
+            // that inflates the waveform's height, but riding the same
+            // amplitude-pulse/range timing, so the colour glow and the
+            // height "punch" always pulse together even though their
+            // magnitudes can differ.
+            tint += amplitudeColour * glow;
+
             vec3 outColour = mix(backgroundColour, tint, coverage);
 
             // Fade out-of-range fragments back to the background colour -
             // see outOfRangeCoverage above.
             outColour = mix(outColour, backgroundColour, outOfRangeCoverage);
+
+            // Outer glow halo, additive on top of everything above (so it
+            // brightens whatever's already there - background, or the
+            // faded edge of the waveform itself - rather than replacing
+            // it). Only meaningfully non-zero where coverage is low (see
+            // coverageFor), i.e. outside/at the edge of the silhouette, so
+            // this doesn't double up with the interior glow already folded
+            // into tint. Suppressed by outOfRangeCoverage too, so the halo
+            // doesn't paint into regions the texture hasn't loaded for yet.
+            outColour += amplitudeColour * halo * (1.0 - outOfRangeCoverage);
 
             return outColour;
         }
@@ -474,6 +699,80 @@ void WaveformComponent::mouseWheelMove(const juce::MouseEvent& e, const juce::Mo
     double newStart = sampleUnderCursor - relX * newLength;
 
     setViewRange(newStart, newLength);
+}
+
+void WaveformComponent::computeAmplitudeBandWeights(float minHz, float maxHz, float& lowWeight, float& midWeight, float& highWeight)
+{
+    // Matches AudioEngine::analyse's fixed cutoffs exactly - these aren't
+    // independently tunable here, only the caller's [minHz, maxHz] window
+    // relative to them is.
+    constexpr float lowMidEdgeHz  = 300.0f;
+    constexpr float midHighEdgeHz = 3000.0f;
+    constexpr float topHz         = 20000.0f; // effectively "top of the analysed range" for overlap purposes
+
+    minHz = juce::jlimit(20.0f, topHz, minHz);
+    maxHz = juce::jlimit(minHz, topHz, maxHz);
+
+    auto overlap = [](float a0, float a1, float b0, float b1)
+    {
+        return juce::jmax(0.0f, juce::jmin(a1, b1) - juce::jmax(a0, b0));
+    };
+
+    const float overlapLow  = overlap(minHz, maxHz, 0.0f, lowMidEdgeHz);
+    const float overlapMid  = overlap(minHz, maxHz, lowMidEdgeHz, midHighEdgeHz);
+    const float overlapHigh = overlap(minHz, maxHz, midHighEdgeHz, topHz);
+    const float total = overlapLow + overlapMid + overlapHigh;
+
+    if (total <= 0.0001f)
+    {
+        // minHz==maxHz landed exactly on a band edge, or some other
+        // degenerate case - fall back to an even split rather than
+        // dividing by (near) zero.
+        lowWeight = midWeight = highWeight = 1.0f / 3.0f;
+        return;
+    }
+
+    lowWeight  = overlapLow  / total;
+    midWeight  = overlapMid  / total;
+    highWeight = overlapHigh / total;
+}
+
+float WaveformComponent::sampleAmplitudeAtSample(double sampleIndex) const
+{
+    auto pyramid = audioEngine.getMipPyramid();
+    if (pyramid == nullptr || pyramid->empty())
+        return 0.0f;
+
+    const auto& finestLevel = pyramid->front();
+    if (finestLevel.empty())
+        return 0.0f;
+
+    const int samplesPerBlock = juce::jmax(1, audioEngine.getNumSamplesPerBlock());
+    const int numBlocks = (int) finestLevel.size();
+    const int centreBlock = (int) (sampleIndex / (double) samplesPerBlock);
+
+    // A small window of blocks, not just the one the playhead is exactly
+    // over - a single block is ~samplesPerBlock/sampleRate seconds wide
+    // (often under 15ms), narrow enough that a real loud hit landing just
+    // outside it would otherwise be missed entirely for a frame or two.
+    // max() (not average) so a nearby loud block isn't diluted by quieter
+    // neighbours either.
+    constexpr int windowRadiusBlocks = 3;
+    const int first = juce::jlimit(0, numBlocks - 1, centreBlock - windowRadiusBlocks);
+    const int last  = juce::jlimit(0, numBlocks - 1, centreBlock + windowRadiusBlocks);
+
+    float lowWeight, midWeight, highWeight;
+    computeAmplitudeBandWeights(params.amplitudeMinFrequencyHz, params.amplitudeMaxFrequencyHz, lowWeight, midWeight, highWeight);
+
+    float maxBandAmplitude = 0.0f;
+    for (int i = first; i <= last; ++i)
+    {
+        const auto& b = finestLevel[(size_t) i];
+        const float bandValue = b.lowEnergy * lowWeight + b.midEnergy * midWeight + b.highEnergy * highWeight;
+        maxBandAmplitude = juce::jmax(maxBandAmplitude, bandValue);
+    }
+
+    return juce::jlimit(0.0f, 1.0f, maxBandAmplitude);
 }
 
 void WaveformComponent::seekToScreenX(float screenX)
@@ -975,6 +1274,17 @@ void WaveformComponent::renderOpenGL()
         : playheadLineTracker.update(audioEngine.getPosition(), isPlayingNow);
     const double playheadSample = sampleRate > 0.0 ? smoothedSeconds * sampleRate : 0.0;
 
+    // Amplitude pulse: the overall amplitude right at the playhead, run
+    // through a fast-attack/slow-release envelope follower so a loud hit
+    // reads as a quick visual punch that decays back down - not a flat,
+    // static boost - and so the whole waveform visibly pulses in time with
+    // the music while playing. Forced to 0 while not playing (isPlayingNow
+    // already covers scratching too, via AudioEngine::isPlaying()), so the
+    // pulse settles back to nothing rather than freezing mid-pulse the
+    // instant playback stops.
+    const float rawAmplitudeEnergy = isPlayingNow ? sampleAmplitudeAtSample(playheadSample) : 0.0f;
+    const float amplitudePulseNow = amplitudePulseTracker.update(rawAmplitudeEnergy, isPlayingNow);
+
     if (followPlayhead && isPlayingNow && sampleRate > 0.0)
     {
         const juce::ScopedLock sl(dataLock);
@@ -1136,9 +1446,25 @@ void WaveformComponent::renderOpenGL()
     setColour("highColour", params.highFreqColour);
     setColour("backgroundColour", params.backgroundColour);
     setColour("playheadColour", params.playheadColour);
+    setColour("amplitudeColour", params.amplitudeColour);
     shader->setUniform("lowAmount", params.lowFreqAmount);
     shader->setUniform("midAmount", params.midFreqAmount);
     shader->setUniform("highAmount", params.highFreqAmount);
+    shader->setUniform("midPole", params.midPole);
+    shader->setUniform("waveformHeight", params.waveformHeight);
+    shader->setUniform("amplitudeAmount", params.amplitudeAmount);
+    shader->setUniform("amplitudeColorAmount", params.amplitudeColorAmount);
+    shader->setUniform("amplitudeGlowRadius", params.amplitudeGlowRadius);
+    shader->setUniform("amplitudePulse", amplitudePulseNow);
+    shader->setUniform("amplitudeRangeNorm", params.amplitudeRange);
+    shader->setUniform("amplitudeSlope", juce::jmax(0.001f, params.amplitudeSlope));
+
+    {
+        float lowWeight, midWeight, highWeight;
+        computeAmplitudeBandWeights(params.amplitudeMinFrequencyHz, params.amplitudeMaxFrequencyHz, lowWeight, midWeight, highWeight);
+        shader->setUniform("amplitudeBandWeights", lowWeight, midWeight, highWeight);
+    }
+
     shader->setUniform("tintEnabled", params.tintingEnabled ? 1.0f : 0.0f);
 
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);

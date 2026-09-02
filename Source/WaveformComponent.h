@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <list>
 #include <unordered_map>
 #include <JuceHeader.h>
@@ -289,6 +290,72 @@ private:
         bool lastReturnedValid = false;
     };
 
+    // Turns a raw, block-granular amplitude reading (which jumps discretely
+    // as the playhead crosses each analysis block boundary) into a smooth
+    // visual "pulse": fast attack so a loud hit reads as an immediate
+    // punch, slower release so it decays back down over a beat or so
+    // instead of vanishing instantly - the shape that actually reads as
+    // "pulsing to the beat" rather than a flickering step function. Forced
+    // towards 0 while not playing (see the isPlaying parameter),
+    // rather than freezing on its last value, so the pulse settles back
+    // down after playback stops instead of leaving the waveform stuck
+    // mid-bulge.
+    class AmplitudePulseTracker
+    {
+    public:
+        float update(float rawEnergy01, bool isPlaying)
+        {
+            const double nowMs = juce::Time::getMillisecondCounterHiRes();
+            const double dtSeconds = validLastTime ? juce::jlimit(0.0, 0.25, (nowMs - lastTimeMs) / 1000.0) : 0.0;
+            lastTimeMs = nowMs;
+            validLastTime = true;
+
+            const float target = isPlaying ? juce::jlimit(0.0f, 1.0f, rawEnergy01) : 0.0f;
+            const double tau = target > smoothed ? attackTauSeconds : releaseTauSeconds;
+            const float coeff = dtSeconds > 0.0 ? (float) (1.0 - std::exp(-dtSeconds / tau)) : 0.0f;
+
+            smoothed += (target - smoothed) * coeff;
+            return smoothed;
+        }
+
+    private:
+        static constexpr double attackTauSeconds  = 0.03; // fast rise - reads as an immediate punch on a hit
+        static constexpr double releaseTauSeconds = 0.25; // slower fall - gives the pulse its visible decay/bounce
+
+        float smoothed = 0.0f;
+        double lastTimeMs = 0.0;
+        bool validLastTime = false;
+    };
+
+    // GL-thread-only (called once per renderOpenGL, alongside the other
+    // playhead reads there). Reads the mip pyramid directly rather than via
+    // the display texture - the texture only covers whatever window is
+    // currently uploaded and lags the background build thread; the
+    // amplitude pulse needs to react to what's happening AT THE PLAYHEAD
+    // right now, which the source analysis data always has regardless of
+    // what's on screen. Returns a blend of the block's low/mid/high band
+    // energies weighted by computeAmplitudeBandWeights(), matching the
+    // shader's own frequency-focused amplitude driver, rather than the raw
+    // broadband peak. Takes the max over a small window of blocks around
+    // the target sample (rather than a single block) so the reading isn't
+    // fully at the mercy of exactly which block boundary the playhead
+    // happens to be crossing at this instant - AmplitudePulseTracker's own
+    // attack/release filtering handles the remaining smoothing.
+    float sampleAmplitudeAtSample(double sampleIndex) const;
+
+    // Cheap approximation of "amplitude in a chosen Hz range" from the
+    // THREE fixed bands AudioEngine already analyses (split at 300Hz and
+    // 3000Hz - see AudioEngine::analyse) rather than a true band-pass
+    // reanalysis: returns how much of [minHz, maxHz] overlaps each of the
+    // low/mid/high bands, normalised to sum to 1. Used identically by the
+    // GL thread (to set the shader's amplitudeBandWeights uniform) and by
+    // sampleAmplitudeAtSample (to blend a block's low/mid/highEnergy the
+    // same way), so the CPU-driven pulse and the shader's own per-block
+    // boost/glow are always focused on the same range. A degenerate range
+    // (minHz >= maxHz after clamping) falls back to an even 1/3 split
+    // across all three bands rather than dividing by zero.
+    static void computeAmplitudeBandWeights(float minHz, float maxHz, float& lowWeight, float& midWeight, float& highWeight);
+
     AudioEngine& audioEngine;
     juce::OpenGLContext openGLContext;
     WaveformParameters params;
@@ -377,6 +444,10 @@ private:
     // centring are computed from this single tracker, in renderOpenGL,
     // from the same reading - see the comment there.
     SmoothPositionTracker playheadLineTracker;
+
+    // GL-thread-only: drives the shader's amplitudePulse uniform - see
+    // AmplitudePulseTracker's own comment.
+    AmplitudePulseTracker amplitudePulseTracker;
 
     double dragStartViewStart = 0.0;
     juce::Point<float> dragStartMouse;
