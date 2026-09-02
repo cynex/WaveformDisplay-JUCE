@@ -16,17 +16,21 @@ struct WaveformParameters
     juce::Colour midFreqColour { juce::Colour(0xffff00ff) };
     juce::Colour highFreqColour{ juce::Colour(0xffffcc00) };
 
-    // Added (not mixed/multiplied) on top of the low/mid/high tint - see
-    // amplitudeColorAmount below - so the waveform visibly brightens/glows
-    // in this colour in time with the music, independently of whatever the
-    // frequency tinting is currently doing (including with tinting
-    // disabled entirely). Strength tracks the same amplitude-driven pulse
-    // that inflates the waveform's height, so the colour glow and the
-    // height "punch" read as one combined pulsing effect rather than two
-    // unrelated ones (even though their MAGNITUDES are controlled
-    // separately - see amplitudeColorAmount). See coverageFor/sampleWaveform
-    // in the shader.
-    juce::Colour amplitudeColour{ juce::Colours::white };
+    // Two independent additive amplitude glow colours - added (not mixed/
+    // multiplied) on top of the low/mid/high tint, so the waveform visibly
+    // brightens/glows in these colours in time with the music, independently
+    // of whatever the frequency tinting is currently doing (including with
+    // tinting disabled entirely). amplitudeLowColour is driven purely by
+    // each block's LOW-frequency energy, amplitudeHighColour purely by its
+    // HIGH-frequency energy - each with its OWN independent envelope-
+    // followed pulse (see AmplitudePulseTracker / the amplitudeLowPulse and
+    // amplitudeHighPulse uniforms), so a bass hit and a treble hit each
+    // produce their own colour's punch at their own moment, rather than
+    // both being tied to one shared broadband reading. Strength (shared
+    // between the two) is controlled by amplitudeColorAmount below. See
+    // coverageFor/sampleWaveform in the shader.
+    juce::Colour amplitudeLowColour { juce::Colours::white };
+    juce::Colour amplitudeHighColour{ juce::Colour(0xffff6a00) };
 
     // How strongly the low/mid/high colours are allowed to tint the solid colour.
     float lowFreqAmount  = 1.0f;
@@ -69,26 +73,29 @@ struct WaveformParameters
     // amplitudeColorAmount below for the separate colour-glow strength.
     float amplitudeAmount = 0.5f;
 
-    // Strength of the additive amplitudeColour glow (see above) - a
-    // SEPARATE control from amplitudeAmount, so the colour glow can be
-    // pushed harder (or softer) than the height boost independently. Goes
-    // up to 4 (not clamped to 1 like amplitudeAmount) since it's driving a
-    // purely additive light effect with no "overflow" concern the way the
-    // height boost has (which has to stay inside the component's +/-1
-    // amplitude range) - values above 1 just make the glow read as
-    // brighter/more saturated at the loudest moments. Rides the same
-    // amplitude-pulse/range timing as amplitudeAmount, so the colour and
-    // height effects still pulse together even at different magnitudes.
+    // Strength of the two additive amplitudeLowColour/amplitudeHighColour
+    // glows (see above) - a SEPARATE control from amplitudeAmount, so the
+    // colour glows can be pushed harder (or softer) than the height boost
+    // independently. Shared between both colours (their individual pulses
+    // still differ). Goes up to 4 (not clamped to 1 like amplitudeAmount)
+    // since it's driving a purely additive light effect with no "overflow"
+    // concern the way the height boost has (which has to stay inside the
+    // component's +/-1 amplitude range) - values above 1 just make the
+    // glow read as brighter/more saturated at the loudest moments. Rides
+    // the same range mask as amplitudeAmount, so all three still pulse
+    // together spatially even at different magnitudes and different
+    // (per-band) timing.
     float amplitudeColorAmount = 1.0f;
 
     // Radius (pixels) of an additive glow halo that floods the NEGATIVE
     // SPACE around the waveform's own silhouette - a distinct effect from
     // amplitudeColorAmount's interior colour glow above, though both use
-    // amplitudeColour and are driven by the exact same amplitude-pulse
-    // "gain" (see coverageFor's haloOut, including its own extra intensity
-    // boost so it actually reads as visible ambient glow rather than a
-    // faint edge fringe), so the halo brightens/dims in lockstep with
-    // everything else the amplitude effect is doing. 0 disables the halo
+    // amplitudeLowColour/amplitudeHighColour and are driven by the exact
+    // same amplitude-pulse "gain" (see coverageFor's haloOut, including its
+    // own extra intensity boost so it actually reads as visible ambient
+    // glow rather than a faint edge fringe), so the halo brightens/dims in
+    // lockstep with everything else the amplitude effect is doing. 0
+    // disables the halo
     // entirely (falls off to nothing at the silhouette's own edge); larger
     // values let it spread further into the background before fading out -
     // the default is deliberately generous (a large fraction of a typical

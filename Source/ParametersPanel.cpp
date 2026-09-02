@@ -50,8 +50,10 @@ ParametersPanel::ParametersPanel()
     addAndMakeVisible(highSwatch);
     addAndMakeVisible(playheadSwatch);
     addAndMakeVisible(playheadLabel);
-    addAndMakeVisible(amplitudeSwatch);
-    addAndMakeVisible(amplitudeLabel);
+    addAndMakeVisible(amplitudeLowSwatch);
+    addAndMakeVisible(amplitudeLowLabel);
+    addAndMakeVisible(amplitudeHighSwatch);
+    addAndMakeVisible(amplitudeHighLabel);
     addAndMakeVisible(tintingEnabledButton);
 
     solidSwatch.setColour(params.solidColour);
@@ -59,7 +61,8 @@ ParametersPanel::ParametersPanel()
     midSwatch.setColour(params.midFreqColour);
     highSwatch.setColour(params.highFreqColour);
     playheadSwatch.setColour(params.playheadColour);
-    amplitudeSwatch.setColour(params.amplitudeColour);
+    amplitudeLowSwatch.setColour(params.amplitudeLowColour);
+    amplitudeHighSwatch.setColour(params.amplitudeHighColour);
 
     addAndMakeVisible(lowAmountLabel);
     addAndMakeVisible(lowAmountSlider);
@@ -142,9 +145,13 @@ ParametersPanel::ParametersPanel()
     {
         showColourPicker(*this, params.playheadColour, [this](juce::Colour c) { params.playheadColour = c; playheadSwatch.setColour(c); notify(); });
     };
-    amplitudeSwatch.onClick = [this]
+    amplitudeLowSwatch.onClick = [this]
     {
-        showColourPicker(*this, params.amplitudeColour, [this](juce::Colour c) { params.amplitudeColour = c; amplitudeSwatch.setColour(c); notify(); });
+        showColourPicker(*this, params.amplitudeLowColour, [this](juce::Colour c) { params.amplitudeLowColour = c; amplitudeLowSwatch.setColour(c); notify(); });
+    };
+    amplitudeHighSwatch.onClick = [this]
+    {
+        showColourPicker(*this, params.amplitudeHighColour, [this](juce::Colour c) { params.amplitudeHighColour = c; amplitudeHighSwatch.setColour(c); notify(); });
     };
 
     lowAmountSlider.onValueChange = [this] { params.lowFreqAmount = (float) lowAmountSlider.getValue(); notify(); };
@@ -190,7 +197,8 @@ void ParametersPanel::setParameters(const WaveformParameters& p)
     midSwatch.setColour(params.midFreqColour);
     highSwatch.setColour(params.highFreqColour);
     playheadSwatch.setColour(params.playheadColour);
-    amplitudeSwatch.setColour(params.amplitudeColour);
+    amplitudeLowSwatch.setColour(params.amplitudeLowColour);
+    amplitudeHighSwatch.setColour(params.amplitudeHighColour);
 }
 
 void ParametersPanel::notify()
@@ -233,7 +241,8 @@ void ParametersPanel::resized()
     colourRow(midSwatch, midLabel);
     colourRow(highSwatch, highLabel);
     colourRow(playheadSwatch, playheadLabel);
-    colourRow(amplitudeSwatch, amplitudeLabel);
+    colourRow(amplitudeLowSwatch, amplitudeLowLabel);
+    colourRow(amplitudeHighSwatch, amplitudeHighLabel);
 
     row(lowAmountLabel, lowAmountSlider);
     row(midAmountLabel, midAmountSlider);

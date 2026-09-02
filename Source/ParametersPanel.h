@@ -65,14 +65,16 @@ private:
     juce::Label midLabel{ {}, "Mid-Freq Tint" };
     juce::Label highLabel{ {}, "High-Freq Tint" };
     juce::Label playheadLabel{ {}, "Playhead" };
-    juce::Label amplitudeLabel{ {}, "Amplitude Colour" };
+    juce::Label amplitudeLowLabel{ {}, "Amplitude Low Colour" };
+    juce::Label amplitudeHighLabel{ {}, "Amplitude High Colour" };
 
     ColourSwatch solidSwatch;
     ColourSwatch lowSwatch;
     ColourSwatch midSwatch;
     ColourSwatch highSwatch;
     ColourSwatch playheadSwatch;
-    ColourSwatch amplitudeSwatch;
+    ColourSwatch amplitudeLowSwatch;
+    ColourSwatch amplitudeHighSwatch;
 
     juce::ToggleButton tintingEnabledButton{ "Enable Tinting" };
 

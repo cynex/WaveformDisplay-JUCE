@@ -343,6 +343,16 @@ private:
     // attack/release filtering handles the remaining smoothing.
     float sampleAmplitudeAtSample(double sampleIndex) const;
 
+    // GL-thread-only, same calling convention as sampleAmplitudeAtSample
+    // above, but returns a single band's energy DIRECTLY (no weighting) -
+    // lowEnergy if highBand is false, highEnergy if true - for the two
+    // independent low/high colour-glow pulses (AmplitudePulseTracker
+    // instances amplitudeLowPulseTracker/amplitudeHighPulseTracker), which
+    // are deliberately NOT tied to amplitudeMinFrequencyHz/
+    // amplitudeMaxFrequencyHz (that range only shapes the HEIGHT boost) -
+    // each colour always tracks its own named band specifically.
+    float sampleBandEnergyAtSample(double sampleIndex, bool highBand) const;
+
     // Cheap approximation of "amplitude in a chosen Hz range" from the
     // THREE fixed bands AudioEngine already analyses (split at 300Hz and
     // 3000Hz - see AudioEngine::analyse) rather than a true band-pass
@@ -445,9 +455,16 @@ private:
     // from the same reading - see the comment there.
     SmoothPositionTracker playheadLineTracker;
 
-    // GL-thread-only: drives the shader's amplitudePulse uniform - see
-    // AmplitudePulseTracker's own comment.
+    // GL-thread-only: drives the shader's amplitudePulse uniform (the
+    // HEIGHT boost only) - see AmplitudePulseTracker's own comment.
     AmplitudePulseTracker amplitudePulseTracker;
+
+    // GL-thread-only: drive the shader's amplitudeLowPulse/amplitudeHighPulse
+    // uniforms respectively - independent of amplitudePulseTracker above and
+    // of each other, so the low and high colour glows can each punch on
+    // their own band's own timing rather than sharing one reading.
+    AmplitudePulseTracker amplitudeLowPulseTracker;
+    AmplitudePulseTracker amplitudeHighPulseTracker;
 
     double dragStartViewStart = 0.0;
     juce::Point<float> dragStartMouse;
