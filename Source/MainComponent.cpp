@@ -39,7 +39,10 @@ MainComponent::MainComponent()
     presetCombo.onChange = [this]
     {
         if (presetCombo.getSelectedId() > 0)
+        {
             presetNameEditor.setText(presetCombo.getText(), juce::dontSendNotification);
+            loadPreset();
+        }
     };
     presetNameEditor.setTextToShowWhenEmpty("New preset name", juce::Colours::grey);
     presetNameEditor.setTooltip("Type a name here, then click Save");

@@ -1514,7 +1514,18 @@ void WaveformComponent::renderOpenGL()
     shader->setUniform("amplitudePulse", amplitudePulseNow);
     shader->setUniform("amplitudeLowPulse", amplitudeLowPulseNow);
     shader->setUniform("amplitudeHighPulse", amplitudeHighPulseNow);
-    shader->setUniform("amplitudeRangeNorm", params.amplitudeRange);
+
+    // Scale the amplitude range down as the view zooms out, purely as a
+    // display-time adjustment - params.amplitudeRange itself (and thus
+    // presets) is untouched. amplitudeRangeNorm is a fraction of the *view*
+    // width, so at close zoom (viewing a small slice of the file) it stays
+    // effectively unchanged; only as the view approaches the whole file does
+    // it ease down (biased to hold off the reduction until well zoomed out,
+    // so it reads as consistent rather than shrinking right away) towards a
+    // floor of 0.01.
+    const float zoomFraction = total > 0.0 ? (float) juce::jlimit(0.0, 1.0, localViewLength / total) : 0.0f;
+    const float zoomAmplitudeScale = juce::jlimit(0.01f, 1.0f, std::pow(1.0f - zoomFraction, 4.0f));
+    shader->setUniform("amplitudeRangeNorm", params.amplitudeRange * zoomAmplitudeScale);
     shader->setUniform("amplitudeSlope", juce::jmax(0.001f, params.amplitudeSlope));
 
     {
