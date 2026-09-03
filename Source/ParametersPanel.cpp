@@ -40,6 +40,8 @@ namespace
 
 ParametersPanel::ParametersPanel()
 {
+    addAndMakeVisible(backgroundLabel);
+    addAndMakeVisible(backgroundSwatch);
     addAndMakeVisible(solidLabel);
     addAndMakeVisible(lowLabel);
     addAndMakeVisible(midLabel);
@@ -56,6 +58,7 @@ ParametersPanel::ParametersPanel()
     addAndMakeVisible(amplitudeHighLabel);
     addAndMakeVisible(tintingEnabledButton);
 
+    backgroundSwatch.setColour(params.backgroundColour);
     solidSwatch.setColour(params.solidColour);
     lowSwatch.setColour(params.lowFreqColour);
     midSwatch.setColour(params.midFreqColour);
@@ -125,6 +128,10 @@ ParametersPanel::ParametersPanel()
 
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
+    backgroundSwatch.onClick = [this]
+    {
+        showColourPicker(*this, params.backgroundColour, [this](juce::Colour c) { params.backgroundColour = c; backgroundSwatch.setColour(c); notify(); });
+    };
     solidSwatch.onClick = [this]
     {
         showColourPicker(*this, params.solidColour, [this](juce::Colour c) { params.solidColour = c; solidSwatch.setColour(c); notify(); });
@@ -192,6 +199,7 @@ void ParametersPanel::setParameters(const WaveformParameters& p)
     amplitudeMaxFreqSlider.setValue(params.amplitudeMaxFrequencyHz, juce::dontSendNotification);
     tintingEnabledButton.setToggleState(params.tintingEnabled, juce::dontSendNotification);
 
+    backgroundSwatch.setColour(params.backgroundColour);
     solidSwatch.setColour(params.solidColour);
     lowSwatch.setColour(params.lowFreqColour);
     midSwatch.setColour(params.midFreqColour);
@@ -232,6 +240,7 @@ void ParametersPanel::resized()
         area.removeFromTop(gap);
     };
 
+    colourRow(backgroundSwatch, backgroundLabel);
     colourRow(solidSwatch, solidLabel);
 
     tintingEnabledButton.setBounds(area.removeFromTop(rowH));

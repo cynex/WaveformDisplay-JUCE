@@ -60,6 +60,7 @@ public:
 private:
     void notify();
 
+    juce::Label backgroundLabel{ {}, "Background Colour" };
     juce::Label solidLabel{ {}, "Solid Colour" };
     juce::Label lowLabel{ {}, "Low-Freq Tint" };
     juce::Label midLabel{ {}, "Mid-Freq Tint" };
@@ -68,6 +69,7 @@ private:
     juce::Label amplitudeLowLabel{ {}, "Amplitude Low Colour" };
     juce::Label amplitudeHighLabel{ {}, "Amplitude High Colour" };
 
+    ColourSwatch backgroundSwatch;
     ColourSwatch solidSwatch;
     ColourSwatch lowSwatch;
     ColourSwatch midSwatch;
